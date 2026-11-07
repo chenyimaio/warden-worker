@@ -58,5 +58,7 @@ try {
 }
 check('错误密钥时 CLI 非零退出', failedExit !== 0, `exit=${failedExit}`);
 
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
-process.exit(failed === 0 ? 0 : 1);
+// 不用 process.exit()：hash-wasm 的 wasm 线程收尾时强退会触发 libuv 断言。
+process.exitCode = failed === 0 ? 0 : 1;

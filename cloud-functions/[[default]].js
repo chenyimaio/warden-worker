@@ -18170,15 +18170,33 @@ app.post("/api/accounts/password-hint", async (c) => {
     if (user) {
       const base = String(envGet(c, "BASE_URL", new URL(c.req.url).origin));
       const mode = String(envGet(c, "HINT_EMAIL_MODE", "plain")).toLowerCase();
-      if (mode === "sealed" && hintEncryptionEnabled(c.env)) {
-        const prof = (await getStore2(c.env).get(keys.profile(user.id)))?.value;
-        const rec = prof?.masterPasswordHintEnc;
+      const sealedMode = mode === "sealed" && hintEncryptionEnabled(c.env);
+      const store = getStore2(c.env);
+      if (sealedMode) {
+        const prof = (await store.get(keys.profile(user.id)))?.value;
+        let rec = prof?.masterPasswordHintEnc ?? null;
+        if (!rec) {
+          const plain = (await readHintValue(c.env, user) ?? "").trim();
+          if (plain) {
+            rec = await encryptHint(c.env, plain);
+            if (prof) {
+              await store.put(keys.profile(user.id), {
+                ...prof,
+                masterPasswordHint: null,
+                masterPasswordHintEnc: rec
+              });
+            }
+          }
+        }
         if (rec) {
           await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
+        } else {
+          console.warn("[hint] sealed mode: no hint stored for", user.id);
         }
       } else {
         const hint = (await readHintValue(c.env, user) ?? "").trim();
         if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+        else console.warn("[hint] plain mode: no hint stored for", user.id);
       }
     }
   } catch (e) {

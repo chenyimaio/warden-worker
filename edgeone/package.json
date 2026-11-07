@@ -18,7 +18,7 @@
     "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs",
     "doc": "node scripts/doc-check.mjs",
     "test:smtp": "node scripts/test-smtp.mjs",
-    "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs && node scripts/test-hint-mail.mjs && node scripts/test-hint-rotate.mjs",
+    "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs && node scripts/test-hint-mail.mjs && node scripts/test-hint-route.mjs && node scripts/test-hint-rotate.mjs",
     "hint:decrypt": "node scripts/decrypt-hint.mjs",
     "hint:migrate": "node scripts/migrate-hints.mjs",
     "hint:rotate": "node scripts/rotate-hints.mjs",

@@ -27,7 +27,7 @@ import {
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
 import { sendPasswordHint, mailConfigured } from './mail.js';
-import { readHintValue, buildHintFields, hintEncryptionEnabled } from './hint.js';
+import { readHintValue, buildHintFields, hintEncryptionEnabled, encryptHint } from './hint.js';
 import { readUpload } from './upload.js';
 
 const app = new Hono();
@@ -413,15 +413,36 @@ app.post('/api/accounts/password-hint', async (c) => {
       //                    收件人需要 HINT_ENCRYPTION_SECRET +
       //                    scripts/decrypt-hint.mjs 才能解开
       const mode = String(envGet(c, 'HINT_EMAIL_MODE', 'plain')).toLowerCase();
-      if (mode === 'sealed' && hintEncryptionEnabled(c.env)) {
-        const prof = (await getStore(c.env).get(keys.profile(user.id)))?.value;
-        const rec = prof?.masterPasswordHintEnc;
+      const sealedMode = mode === 'sealed' && hintEncryptionEnabled(c.env);
+      const store = getStore(c.env);
+
+      if (sealedMode) {
+        const prof = (await store.get(keys.profile(user.id)))?.value;
+        let rec = prof?.masterPasswordHintEnc ?? null;
+        if (!rec) {
+          // 旧账号：库里还是明文，没有密文可发。就地加密一份再发，
+          // 顺手把库里的明文升级成密文（这样下次直接命中上面的分支）。
+          const plain = ((await readHintValue(c.env, user)) ?? '').trim();
+          if (plain) {
+            rec = await encryptHint(c.env, plain);
+            if (prof) {
+              await store.put(keys.profile(user.id), {
+                ...prof,
+                masterPasswordHint: null,
+                masterPasswordHintEnc: rec,
+              });
+            }
+          }
+        }
         if (rec) {
           await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
+        } else {
+          console.warn('[hint] sealed mode: no hint stored for', user.id);
         }
       } else {
         const hint = ((await readHintValue(c.env, user)) ?? '').trim();
         if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+        else console.warn('[hint] plain mode: no hint stored for', user.id);
       }
     }
   } catch (e) {
