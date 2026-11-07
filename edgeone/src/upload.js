@@ -64,7 +64,8 @@ export async function readUpload(c) {
 
     if (filename !== undefined) {
       if (fileBytes === null) {
-        fileBytes = bytes;
+        // 复制一份：subarray 是视图，存储层若直接读 .buffer 会拿到整个请求体。
+        fileBytes = Buffer.from(bytes);
         fileName = filename;
       }
     } else if (name) {

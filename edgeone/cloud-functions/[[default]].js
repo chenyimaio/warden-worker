@@ -17802,7 +17802,7 @@ async function readUpload(c) {
     const filename = /filename="([^"]*)"/i.exec(headers)?.[1];
     if (filename !== void 0) {
       if (fileBytes === null) {
-        fileBytes = bytes;
+        fileBytes = Buffer.from(bytes);
         fileName = filename;
       }
     } else if (name) {
@@ -19049,6 +19049,14 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   });
 });
 async function uploadAttachmentBytes(c) {
+  const platformMax = Number(envGet(c, "SEND_UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  const declared = Number(c.req.header("content-length") || 0);
+  if (platformMax && declared > platformMax) {
+    return c.json(
+      { error: `Attachment too large: up to ${(platformMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`, limit: platformMax },
+      413
+    );
+  }
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const store = getStore2(c.env);
@@ -19475,6 +19483,18 @@ app.post("/api/sends/file/v2", async (c) => {
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
   const id = c.req.param("id");
+  const maxBytes = Number(envGet(c, "SEND_UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  const declared = Number(c.req.header("content-length") || 0);
+  if (maxBytes && declared > maxBytes) {
+    console.warn("[send-upload] rejected by content-length", declared);
+    return c.json(
+      {
+        error: `File too large: this deployment accepts uploads up to ${(maxBytes / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: maxBytes
+      },
+      413
+    );
+  }
   const a = await requireAuth(c);
   let userId;
   let anonUpload = false;
@@ -19498,12 +19518,27 @@ async function uploadSendFile(c) {
   }
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: "not found" }, 404);
-  const up = await readUpload(c);
+  let up;
+  try {
+    up = await readUpload(c);
+  } catch (e) {
+    console.error("[send-upload] readUpload failed", c.req.header("content-type"), e?.message || e);
+    return c.json({ error: "failed to read upload body" }, 400);
+  }
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
-  const maxBytes = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
-  if (maxBytes && bytes.length > maxBytes) return c.json({ error: "File too large" }, 413);
-  await store.putBinary(keys.sendFile(userId, id), bytes);
+  const attachmentMax = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
+  const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
+  if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
+    console.warn("[send-upload] rejected after read", bytes.length);
+    return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
+  }
+  try {
+    await store.putBinary(keys.sendFile(userId, id), bytes);
+  } catch (e) {
+    console.error("[send-upload] putBinary failed", bytes.length, e?.message || e);
+    return c.json({ error: "failed to store file", size: bytes.length }, 500);
+  }
   const next = await mutate(
     store,
     keys.send(userId, id),
@@ -19513,6 +19548,7 @@ async function uploadSendFile(c) {
       updatedAt: nowIso()
     } : void 0
   );
+  if (!next) return c.json({ error: "send disappeared during upload" }, 409);
   await touchUser(store, userId);
   return c.json(sendToJson(next), anonUpload ? 201 : 200);
 }

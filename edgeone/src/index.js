@@ -1415,6 +1415,16 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 // readUpload 已移到 ./upload.js（手工 multipart 解析，见该文件顶部说明）
 
 async function uploadAttachmentBytes(c) {
+  // 和文件 Send 一样：EdgeOne 单次请求体上限约 6MB，超了平台会直接 500。
+  const platformMax = Number(envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  const declared = Number(c.req.header('content-length') || 0);
+  if (platformMax && declared > platformMax) {
+    return c.json(
+      { error: `Attachment too large: up to ${(platformMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`, limit: platformMax },
+      413,
+    );
+  }
+
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const store = getStore(c.env);
@@ -1900,6 +1910,23 @@ app.post('/api/sends/file/v2', async (c) => {
 async function uploadSendFile(c) {
   const store = getStore(c.env);
   const id = c.req.param('id');
+
+  // EdgeOne 对单次请求体有硬上限（实测 6MB 可以、7MB 直接被平台拦成 500
+  // INTERNAL_CLOUD_FUNCTION_INVOCATION_FAILED）。提前用 Content-Length 拦掉，
+  // 给客户端一个明确的 413，而不是让它看到 500。
+  const maxBytes = Number(envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  const declared = Number(c.req.header('content-length') || 0);
+  if (maxBytes && declared > maxBytes) {
+    console.warn('[send-upload] rejected by content-length', declared);
+    return c.json(
+      {
+        error: `File too large: this deployment accepts uploads up to ${(maxBytes / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: maxBytes,
+      },
+      413,
+    );
+  }
+
   const a = await requireAuth(c);
 
   let userId;
@@ -1928,13 +1955,28 @@ async function uploadSendFile(c) {
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: 'not found' }, 404);
 
-  const up = await readUpload(c);
+  let up;
+  try {
+    up = await readUpload(c);
+  } catch (e) {
+    console.error('[send-upload] readUpload failed', c.req.header('content-type'), e?.message || e);
+    return c.json({ error: 'failed to read upload body' }, 400);
+  }
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
-  const maxBytes = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
-  if (maxBytes && bytes.length > maxBytes) return c.json({ error: 'File too large' }, 413);
+  const attachmentMax = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
+  const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
+  if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
+    console.warn('[send-upload] rejected after read', bytes.length);
+    return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
+  }
 
-  await store.putBinary(keys.sendFile(userId, id), bytes);
+  try {
+    await store.putBinary(keys.sendFile(userId, id), bytes);
+  } catch (e) {
+    console.error('[send-upload] putBinary failed', bytes.length, e?.message || e);
+    return c.json({ error: 'failed to store file', size: bytes.length }, 500);
+  }
   const next = await mutate(store, keys.send(userId, id), (cur) =>
     cur
       ? {
@@ -1944,6 +1986,7 @@ async function uploadSendFile(c) {
         }
       : undefined,
   );
+  if (!next) return c.json({ error: 'send disappeared during upload' }, 409);
   await touchUser(store, userId);
   // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
   //   200 = 带 token 的正常上传；201 = 走了匿名兜底。
