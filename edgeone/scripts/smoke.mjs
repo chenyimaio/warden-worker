@@ -155,6 +155,14 @@ check('GET profile', r.status === 200 && r.data.email === email, r);
 r = await call('GET', '/api/accounts/revision-date', { token: access });
 check('GET revision-date', r.status === 200 && typeof r.data === 'number', r);
 
+// 12b. 主密码提示可单独修改（不影响其它字段），空串表示清除
+r = await call('PUT', '/api/accounts/profile', { token: access, body: { masterPasswordHint: '2.新提示' } });
+check('PUT profile 改主密码提示', r.status === 200, r);
+r = await call('PUT', '/api/accounts/profile', { token: access, body: { name: 'SmokeRenamed' } });
+check('只改名字不动提示', r.status === 200 && r.data?.name === 'SmokeRenamed', r);
+r = await call('PUT', '/api/accounts/profile', { token: access, body: { masterPasswordHint: '' } });
+check('空串清除提示', r.status === 200, r);
+
 // 13. password-hint：恒定 200，且不泄露提示内容
 r = await call('POST', '/api/accounts/password-hint', { body: { email } });
 check('password-hint 返回 200 且不透出提示', r.status === 200 && JSON.stringify(r.data) === '{}', r);

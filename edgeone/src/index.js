@@ -642,6 +642,11 @@ async function updateProfile(c) {
       ...cur,
       name: p.name ?? cur.name,
       avatarColor: p.avatarColor ?? cur.avatarColor,
+      // 允许单独改主密码提示（传空串/null 表示清除）；不传则保持原值
+      masterPasswordHint:
+        p.masterPasswordHint === undefined
+          ? cur.masterPasswordHint
+          : String(p.masterPasswordHint || '').trim() || null,
       updatedAt: nowIso(),
     };
   });
