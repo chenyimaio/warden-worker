@@ -34,6 +34,9 @@ function transport(env) {
         socketTimeout: 20_000,
         pool: true,
         maxConnections: 1,
+        // 587/25 这类非隐式 TLS 端口必须升级到 STARTTLS，不允许明文投递
+        // （secure=true 时该选项被忽略，465 走隐式 TLS）
+        requireTLS: !secure,
         tls: { minVersion: 'TLSv1.2' },
       }),
     );
