@@ -539,8 +539,17 @@ check('upload url 指向本服务 /api/sends/{id}/file/{id}', String(r.data?.url
 r = await call('POST', `/api/sends/${fsId}/file/${fsId}`, { token: access5, raw: Buffer.from('world') });
 check('上传文件 Send 字节', r.status === 200, r);
 
-r = await call('POST', `/api/sends/${fsId}/access/file/${fsId}`, {});
-check('匿名下载文件 Send', r.status === 200 && r.rawText === 'world', r);
+// 网页版下载文件 Send 的契约：POST 返回 { url }，再自己 fetch(url) 拿字节
+const sendFileUrl = async (fileId) => {
+  const res = await call('POST', `/api/sends/access/file/${fileId}`, {});
+  if (res.status !== 200 || !res.data?.url) return { res, bytes: null };
+  const u = new URL(res.data.url, 'http://localhost');
+  const bytes = await call('GET', u.pathname + u.search);
+  return { res, bytes };
+};
+
+const dl1 = await sendFileUrl(fsId);
+check('匿名下载文件 Send（先拿 url 再取字节）', dl1.res.status === 200 && !!dl1.res.data?.url && dl1.bytes?.rawText === 'world', dl1);
 
 // 23b. 旧客户端：/api/sends/access/file/{accessId}（不能被 :id/file/:fileId 抢占）
 r = await call('POST', '/api/sends/file/v2', {
@@ -551,8 +560,8 @@ const fsId2 = r.data?.sendResponse?.id;
 const fsAccessId = r.data?.sendResponse?.accessId;
 r = await call('POST', `/api/sends/${fsId2}/file/${fsId2}`, { token: access5, raw: Buffer.from('abc') });
 check('第二个文件 Send 上传', r.status === 200, r);
-r = await call('POST', `/api/sends/access/file/${fsAccessId}`, {});
-check('legacy /sends/access/file/{accessId} 下载', r.status === 200 && r.rawText === 'abc', r);
+const dl2 = await sendFileUrl(fsAccessId);
+check('legacy /sends/access/file/{accessId} 下载', dl2.res.status === 200 && dl2.bytes?.rawText === 'abc', dl2);
 
 // 23c. multipart（Direct 上传的另一种形态）与 PUT（Azure 风格）都能收
 r = await call('POST', `/api/sends/${fsId2}/file/${fsId2}`, {
@@ -560,13 +569,13 @@ r = await call('POST', `/api/sends/${fsId2}/file/${fsId2}`, {
   multipart: { field: 'data', name: 'c.txt', bytes: Buffer.from('multipart-bytes') },
 });
 check('multipart 上传', r.status === 200, r);
-r = await call('POST', `/api/sends/access/file/${fsAccessId}`, {});
-check('multipart 内容可下载', r.status === 200 && r.rawText === 'multipart-bytes', r);
+const dl3 = await sendFileUrl(fsAccessId);
+check('multipart 内容可下载', dl3.res.status === 200 && dl3.bytes?.rawText === 'multipart-bytes', dl3);
 
 r = await call('PUT', `/api/sends/${fsId2}/file/${fsId2}`, { token: access5, raw: Buffer.from('put-bytes') });
 check('PUT 上传（Azure 风格）', r.status === 200, r);
-r = await call('POST', `/api/sends/access/file/${fsAccessId}`, {});
-check('PUT 内容可下载', r.status === 200 && r.rawText === 'put-bytes', r);
+const dl4 = await sendFileUrl(fsAccessId);
+check('PUT 内容可下载', dl4.res.status === 200 && dl4.bytes?.rawText === 'put-bytes', dl4);
 
 // 24. 桩路由 / 小路由 / 删号
 r = await call('GET', '/api/tasks', { token: access4 });

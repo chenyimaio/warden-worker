@@ -19441,6 +19441,39 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: "file not found" }, 404);
+  const downloadToken = await signAccess(c.env, {
+    sub: "send-access",
+    sid: accessIdFromUuid(send.id),
+    scope: ["api.send.access"]
+  });
+  const fileId = c.req.param("fileId");
+  return c.json({
+    id: fileId,
+    url: `${baseUrlOf(c)}/api/sends/access/file/${fileId}/data?token=${encodeURIComponent(downloadToken)}`,
+    object: "send-file-download-data"
+  });
+});
+app.get("/api/sends/access/file/:fileId/data", async (c) => {
+  const token = String(c.req.query("token") ?? "");
+  let payload;
+  try {
+    payload = await verifyAccess(c.env, token);
+  } catch (e) {
+    console.warn("[send-access] download token rejected", e?.code || e?.message || e);
+    return c.json({ error: "invalid access token" }, 401);
+  }
+  if (!Array.isArray(payload.scope) || !payload.scope.includes("api.send.access") || payload.sid == null) {
+    return c.json({ error: "invalid access token" }, 401);
+  }
+  const store = getStore2(c.env);
+  const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
+  if (!idx) return c.json({ error: "Send is not accessible" }, 404);
+  const send = (await store.get(keys.send(idx.userId, idx.id)))?.value;
+  if (!send) return c.json({ error: "Send is not accessible" }, 404);
+  const v = validateSendAccess(send);
+  if (v.error) return c.json({ error: v.error }, v.status);
+  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
+  if (!bytes) return c.json({ error: "file not found" }, 404);
   return c.body(bytes, 200, {
     "content-type": "application/octet-stream",
     "content-length": String(bytes.length),

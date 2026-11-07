@@ -1841,6 +1841,49 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: 'file not found' }, 404);
+
+  // 网页版（Vaultwarden 2026.x）拿到的是 JSON，然后自己 fetch(url)：
+  //   const t = await sendApiService.getSendFileDownloadData(send, token);
+  //   if (isNullOrWhitespace(t.url)) { toast("missingSendFile"); return; }
+  //   const n = await fetch(new Request(t.url, { cache: "no-store" }));
+  // 所以这里必须返回带 url 的 JSON，而不是字节流。url 里带一个短期令牌，
+  // 因为网页版那次 fetch 不会再带 Authorization。
+  const downloadToken = await signAccess(c.env, {
+    sub: 'send-access',
+    sid: accessIdFromUuid(send.id),
+    scope: ['api.send.access'],
+  });
+  const fileId = c.req.param('fileId');
+  return c.json({
+    id: fileId,
+    url: `${baseUrlOf(c)}/api/sends/access/file/${fileId}/data?token=${encodeURIComponent(downloadToken)}`,
+    object: 'send-file-download-data',
+  });
+});
+
+// 真正吐字节的地方：网页版用上一步返回的 url 直接 fetch（不带 header），
+// 所以这里用查询串里的短期令牌鉴权。
+app.get('/api/sends/access/file/:fileId/data', async (c) => {
+  const token = String(c.req.query('token') ?? '');
+  let payload;
+  try {
+    payload = await verifyAccess(c.env, token);
+  } catch (e) {
+    console.warn('[send-access] download token rejected', e?.code || e?.message || e);
+    return c.json({ error: 'invalid access token' }, 401);
+  }
+  if (!Array.isArray(payload.scope) || !payload.scope.includes('api.send.access') || payload.sid == null) {
+    return c.json({ error: 'invalid access token' }, 401);
+  }
+  const store = getStore(c.env);
+  const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
+  if (!idx) return c.json({ error: 'Send is not accessible' }, 404);
+  const send = (await store.get(keys.send(idx.userId, idx.id)))?.value;
+  if (!send) return c.json({ error: 'Send is not accessible' }, 404);
+  const v = validateSendAccess(send);
+  if (v.error) return c.json({ error: v.error }, v.status);
+  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
+  if (!bytes) return c.json({ error: 'file not found' }, 404);
   return c.body(bytes, 200, {
     'content-type': 'application/octet-stream',
     'content-length': String(bytes.length),
