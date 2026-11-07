@@ -1,7 +1,7 @@
 {
   "name": "warden-edgeone",
   "installCommand": "node -e \"process.exit(0)\"",
-  "buildCommand": "node -e \"process.exit(0)\"",
+  "buildCommand": "node scripts/fetch-web-vault.mjs",
   "outputDirectory": "public",
   "nodeVersion": "20.18.0",
   "cloudFunctions": {

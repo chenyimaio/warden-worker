@@ -20,8 +20,27 @@
       a { color: #0969da; }
       .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
       .dot { color: #1a7f37; font-weight: 600; }
+      .hidden { display: none; }
       footer { margin-top: 48px; color: #57606a; font-size: 13px; }
     </style>
+    <script>
+      // 1) #/send/... 是 Bitwarden Send 的分享链接（前端路由）：
+      //    即使网页版被关闭，也要把它转到 /vault/ 去渲染，否则 Send 链接打不开。
+      // 2) 网页版开启时，根路径直接进 /vault/。
+      (function () {
+        var hash = location.hash || '';
+        if (hash.indexOf('#/send/') === 0) {
+          location.replace('/vault/' + hash);
+          return;
+        }
+        fetch('/api/web-status', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (s) {
+            if (s && s.enabled) location.replace('/vault/');
+          })
+          .catch(function () {});
+      })();
+    </script>
   </head>
   <body>
     <h1>Warden</h1>
@@ -47,7 +66,7 @@
     <p class="dot">API 正常</p>
 
     <footer>
-      数据存储于 Cloudflare/EdgeOne 边缘对象存储，主密码与库内容端到端加密，服务端不可读。
+      数据存储于 EdgeOne Makers Blob，主密码与库内容端到端加密，服务端不可读。
     </footer>
 
     <script>

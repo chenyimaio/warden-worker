@@ -15,12 +15,14 @@
     "parity": "node scripts/route-parity.mjs --strict",
     "test:blob": "node scripts/blob-adapter-test.mjs",
     "test:repair": "node scripts/test-profile-repair.mjs",
+    "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs",
     "doc": "node scripts/doc-check.mjs",
     "test:smtp": "node scripts/test-smtp.mjs",
     "blob:selftest": "node scripts/blob-selftest.mjs"
   },
   "dependencies": {
     "@edgeone/pages-blob": "^0.0.19",
+    "hash-wasm": "^4.13.0",
     "hono": "^4.6.0",
     "jose": "^5.9.0",
     "nodemailer": "^6.9.0"

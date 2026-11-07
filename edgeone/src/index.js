@@ -27,6 +27,7 @@ import {
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
 import { sendPasswordHint, mailConfigured } from './mail.js';
+import { readHintValue, buildHintFields } from './hint.js';
 
 const app = new Hono();
 app.use('*', cors());
@@ -300,6 +301,14 @@ app.get('/api/config', (c) => {
   });
 });
 
+// 网页版开关：供前端落地页决定是否跳到 /vault/
+app.get('/api/web-status', (c) =>
+  c.json({
+    enabled: String(envGet(c, 'WEB_VAULT_ENABLED', 'true')).toLowerCase() !== 'false',
+    object: 'web-status',
+  }),
+);
+
 // ---------------------------------------------------------------- accounts
 const prelogin = async (c) => {
   const { email } = await body(c);
@@ -354,7 +363,7 @@ async function register(c) {
     masterPasswordHash: hashPassword(masterPasswordHash, salt, iterations),
     passwordSalt: salt,
     passwordIterations: iterations,
-    masterPasswordHint: readHint(p) || null,
+    ...(await buildHintFields(c.env, readHint(p))),
     key: userSymmetricKey,
     privateKey: String(asym.encryptedPrivateKey ?? ''),
     publicKey: String(asym.publicKey ?? ''),
@@ -390,7 +399,7 @@ app.post('/api/accounts/password-hint', async (c) => {
   //  200
   try {
     const user = email ? await findUserByEmail(c, email) : null;
-    const hint = (user?.masterPasswordHint ?? user?.[''] ?? '').toString().trim();
+    const hint = ((await readHintValue(c.env, user)) ?? '').trim();
     if (user && hint) {
       const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
@@ -650,16 +659,15 @@ async function updateProfile(c) {
   const p = await body(c);
   const store = getStore(c.env);
   const uid = a.claims.sub;
+  // 允许单独改主密码提示（传空串/null 表示清除）；不传则保持原值
+  const hintFields = hasHintField(p) ? await buildHintFields(c.env, readHint(p)) : null;
   const next = await mutate(store, keys.profile(uid), (cur) => {
     if (!cur) return undefined;
     return {
       ...cur,
       name: p.name ?? cur.name,
       avatarColor: p.avatarColor ?? cur.avatarColor,
-      // 允许单独改主密码提示（传空串/null 表示清除）；不传则保持原值
-      masterPasswordHint: hasHintField(p)
-        ? String(readHint(p) ?? '').trim() || null
-        : cur.masterPasswordHint,
+      ...(hintFields ?? {}),
       updatedAt: nowIso(),
     };
   });
@@ -1187,6 +1195,7 @@ app.post('/api/accounts/password', async (c) => {
   const salt = randomB64();
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
   const stamp = newId();
+  const hintFields = hasHintField(p) ? await buildHintFields(c.env, readHint(p)) : null;
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
@@ -1195,7 +1204,7 @@ app.post('/api/accounts/password', async (c) => {
           passwordSalt: salt,
           passwordIterations: iterations,
           key: p.key ?? cur.key,
-          masterPasswordHint: hasHintField(p) ? readHint(p) || null : cur.masterPasswordHint,
+          ...(hintFields ?? {}),
           securityStamp: stamp,
           updatedAt: nowIso(),
         }
