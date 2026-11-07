@@ -17552,8 +17552,18 @@ var BlobStore = class {
     return (res?.blobs ?? []).map((b) => ({ key: b.key, etag: b.etag ?? null, size: 0 }));
   }
   // 附件用二进制通道（不经过 JSON 序列化）
+  //
+  // 注意：type: 'arrayBuffer' 拿回来的是 ArrayBuffer（有 byteLength，没有 length），
+  // 而调用方（下载响应）用的是 bytes.length 和 Buffer 语义。这里统一转成 Buffer，
+  // 否则 Content-Length 会被写成字符串 "undefined"，平台直接报
+  // "bad Content-Length"，下载/文件 Send 全部打不开。
   async getBinary(key) {
-    return await this.#store.get(key, { type: "arrayBuffer", consistency: "strong" });
+    const raw2 = await this.#store.get(key, { type: "arrayBuffer", consistency: "strong" });
+    if (raw2 == null) return null;
+    if (Buffer.isBuffer(raw2)) return raw2;
+    if (raw2 instanceof ArrayBuffer) return Buffer.from(raw2);
+    if (ArrayBuffer.isView(raw2)) return Buffer.from(raw2.buffer, raw2.byteOffset, raw2.byteLength);
+    return Buffer.from(String(raw2));
   }
   async putBinary(key, bytes) {
     await this.#store.set(key, bytes);
