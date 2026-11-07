@@ -17640,18 +17640,26 @@ function transport(env) {
   return cache.get(id);
 }
 var escapeHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-function passwordHintTemplate({ hint, baseUrl }) {
+function passwordHintTemplate({ hint, sealed, baseUrl }) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
-  const safeHint = String(hint).slice(0, 1e3);
-  const subject = "\u4E3B\u5BC6\u7801\u63D0\u793A / Your master password hint";
+  const isSealed = sealed != null && String(sealed).trim() !== "";
+  const body2 = String(isSealed ? sealed : hint).slice(0, 4e3);
+  const subject = isSealed ? "\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08\u5DF2\u52A0\u5BC6\uFF09/ Encrypted master password hint" : "\u4E3B\u5BC6\u7801\u63D0\u793A / Your master password hint";
+  const intro = isSealed ? [
+    "\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF0C\u5DF2\u7528\u670D\u52A1\u5668\u7684 HINT_ENCRYPTION_SECRET \u52A0\u5BC6\u540E\u53D1\u9001\u3002",
+    "",
+    "\u89E3\u5BC6\u65B9\u5F0F\uFF08\u5728\u4ED3\u5E93\u91CC\u6267\u884C\uFF0C\u4E0D\u9700\u8981\u8054\u7F51\uFF09\uFF1A",
+    "    node edgeone/scripts/decrypt-hint.mjs --secret '<HINT_ENCRYPTION_SECRET>'",
+    "\u7136\u540E\u628A\u4E0B\u9762\u8FD9\u6BB5\u4F5C\u4E3A --record \u4F20\u5165\uFF08\u6216\u76F4\u63A5\u7C98\u8D34\u5230\u6807\u51C6\u8F93\u5165\uFF09\u3002"
+  ].join("\n") : "\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08master password hint\uFF09\uFF1A";
   const text = [
     "\u4F60\u597D\uFF0C",
     "",
-    "\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08master password hint\uFF09\uFF1A",
+    intro,
     "",
-    `    ${safeHint}`,
+    `    ${body2}`,
     "",
-    "\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002",
+    isSealed ? "\u6CA1\u6709 HINT_ENCRYPTION_SECRET \u65F6\u8FD9\u6BB5\u5185\u5BB9\u65E0\u6CD5\u89E3\u5F00\uFF1B\u8BF7\u628A\u5B83\u548C\u5BC6\u94A5\u5206\u5F00\u4FDD\u5B58\u3002" : "\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002",
     "\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\uFF0C\u8D26\u6237\u4E0D\u4F1A\u6709\u4EFB\u4F55\u53D8\u5316\u3002",
     "",
     base ? `\u767B\u5F55\uFF1A${base}` : "",
@@ -17660,9 +17668,9 @@ function passwordHintTemplate({ hint, baseUrl }) {
   ].filter(Boolean).join("\n");
   const html = `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2328">
 <p>\u4F60\u597D\uFF0C</p>
-<p>\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08master password hint\uFF09\uFF1A</p>
-<pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:14px">${escapeHtml(safeHint)}</pre>
-<p style="color:#57606a">\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\u3002</p>
+<p>${escapeHtml(intro).replace(/\n/g, "<br>")}</p>
+<pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:13px">${escapeHtml(body2)}</pre>
+<p style="color:#57606a">${isSealed ? "\u6CA1\u6709 HINT_ENCRYPTION_SECRET \u65F6\u8FD9\u6BB5\u5185\u5BB9\u65E0\u6CD5\u89E3\u5F00\uFF1B\u8BF7\u628A\u5B83\u548C\u5BC6\u94A5\u5206\u5F00\u4FDD\u5B58\u3002" : "\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002"}\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\u3002</p>
 ${base ? `<p><a href="${escapeHtml(base)}">${escapeHtml(base)}</a></p>` : ""}
 <p style="color:#57606a;font-size:13px">\u2014 Warden</p>
 </div>`;
@@ -17689,8 +17697,8 @@ async function sendMail(env, { to, subject, text, html }) {
   console.log("[mail] sent", { to, messageId: info.messageId, response: info.response });
   return { messageId: info.messageId, response: info.response };
 }
-async function sendPasswordHint(env, { to, hint, baseUrl }) {
-  const { subject, text, html } = passwordHintTemplate({ hint, baseUrl });
+async function sendPasswordHint(env, { to, hint, sealed, baseUrl }) {
+  const { subject, text, html } = passwordHintTemplate({ hint, sealed, baseUrl });
   return sendMail(env, { to, subject, text, html });
 }
 
@@ -18159,10 +18167,19 @@ app.post("/api/accounts/password-hint", async (c) => {
   if (rlIp) return rlIp;
   try {
     const user = email ? await findUserByEmail(c, email) : null;
-    const hint = (await readHintValue(c.env, user) ?? "").trim();
-    if (user && hint) {
+    if (user) {
       const base = String(envGet(c, "BASE_URL", new URL(c.req.url).origin));
-      await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+      const mode = String(envGet(c, "HINT_EMAIL_MODE", "plain")).toLowerCase();
+      if (mode === "sealed" && hintEncryptionEnabled(c.env)) {
+        const prof = (await getStore2(c.env).get(keys.profile(user.id)))?.value;
+        const rec = prof?.masterPasswordHintEnc;
+        if (rec) {
+          await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
+        }
+      } else {
+        const hint = (await readHintValue(c.env, user) ?? "").trim();
+        if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+      }
     }
   } catch (e) {
     console.error("[hint] send failed", e?.message || e);
