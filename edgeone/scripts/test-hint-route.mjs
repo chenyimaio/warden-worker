@@ -1,9 +1,8 @@
 // scripts/test-hint-route.mjs
-// 回归测试：sealed 模式下，库里只有明文提示的旧账号也要能发出提示（就地加密）。
-// 用法：node scripts/test-hint-route.mjs
+// 端到端：password-hint 路由在两种配置下分别发什么，以及存储是否保持明文。
+// 用 MAIL_DRY_RUN=true + 拦截 console.log 来判断实际走的是哪个分支。
 import app from '../src/index.js';
 import { getStore } from '../src/store.js';
-import { decryptHint } from '../src/hint.js';
 
 let failed = 0;
 const check = (name, ok, extra) => {
@@ -21,7 +20,10 @@ const base = {
   JWT_REFRESH_SECRET: 'r',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
-  MAIL_ENABLED: 'false',
+  // 现在只要 SMTP_HOST + MAIL_FROM 就认为可发信（MAIL_ENABLED 已移除）
+  SMTP_HOST: 'smtp.example.com',
+  MAIL_FROM: 'no-reply@example.com',
+  MAIL_DRY_RUN: 'true', // 只打日志，不真的发信
 };
 
 const call = async (env, method, path, body) => {
@@ -43,9 +45,23 @@ const call = async (env, method, path, body) => {
   return { status: res.status, data };
 };
 
-const email = `legacy-${Date.now()}@example.com`;
+/** 抓一次请求里 dry-run 邮件日志中的 subject */
+const captureMailSubject = async (env, email) => {
+  const seen = [];
+  const origLog = console.log;
+  console.log = (...args) => seen.push(args);
+  try {
+    await call(env, 'POST', '/api/accounts/password-hint', { email });
+  } finally {
+    console.log = origLog;
+  }
+  const line = seen.find((args) => String(args[0]).includes('[mail][dry-run]'));
+  return line?.[1]?.subject ?? null;
+};
 
-// 1) 明文模式注册 -> 库里是明文（模拟开启加密之前的老账号）
+const email = `route-${Date.now()}@example.com`;
+
+// 注册（未配密钥 => 明文落库）
 await call({ ...base, HINT_ENCRYPTION_SECRET: '*' }, 'POST', '/api/accounts/register', {
   email,
   masterPasswordHash: 'm',
@@ -60,26 +76,23 @@ const store = getStore(base);
 const profileKey = (await store.list('u/'))
   .map((e) => e.key)
   .find((k) => k.endsWith('/profile.json'));
-const before = (await store.get(profileKey)).value;
-check('旧账号注册后是明文', before.masterPasswordHint === '老地方' && !before.masterPasswordHintEnc, before);
+const prof = (await store.get(profileKey)).value;
+check('注册后是明文', prof.masterPasswordHint === '老地方' && !prof.masterPasswordHintEnc, prof);
 
-// 2) sealed 模式请求提示
-const sealedEnv = { ...base, HINT_ENCRYPTION_SECRET: SECRET, HINT_EMAIL_MODE: 'sealed' };
-const resp = await call(sealedEnv, 'POST', '/api/accounts/password-hint', { email });
-check('sealed 模式请求提示返回 200', resp.status === 200, resp);
-
-// 3) 明文被就地升级成密文，且能解回原文
-const after = (await store.get(profileKey)).value;
-check('旧账号被就地升级为密文', after.masterPasswordHint === null && !!after.masterPasswordHintEnc, after);
-check(
-  '就地加密的密文能解开',
-  (await decryptHint({ HINT_ENCRYPTION_SECRET: SECRET }, after.masterPasswordHintEnc)) === '老地方',
+// 1) 配了密钥（auto）=> 邮件发密文
+const sealedSubject = await captureMailSubject(
+  { ...base, HINT_ENCRYPTION_SECRET: SECRET },
+  email,
 );
+check('配了密钥：邮件是密文标题', String(sealedSubject ?? '').includes('已加密'), sealedSubject);
 
-// 4) 再请求一次：直接命中密文分支，不再改写数据
-const again = await call(sealedEnv, 'POST', '/api/accounts/password-hint', { email });
-const after2 = (await store.get(profileKey)).value;
-check('第二次请求仍 200 且密文未变', again.status === 200 && after2.masterPasswordHintEnc.ct === after.masterPasswordHintEnc.ct, again);
+// 2) 存储仍然是明文（不因为发信被改写）
+const after = (await store.get(profileKey)).value;
+check('发信后存储仍是明文', after.masterPasswordHint === '老地方' && !after.masterPasswordHintEnc, after);
+
+// 3) 没配密钥 => 邮件发明文
+const plainSubject = await captureMailSubject({ ...base, HINT_ENCRYPTION_SECRET: '*' }, email);
+check('没配密钥：邮件是明文标题', String(plainSubject ?? '').includes('主密码提示') && !String(plainSubject).includes('已加密'), plainSubject);
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exitCode = failed === 0 ? 0 : 1;

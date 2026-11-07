@@ -10,7 +10,7 @@ function cfg(env, name, dflt) {
 }
 
 export function mailConfigured(env) {
-  if (String(cfg(env, 'MAIL_ENABLED', 'true')).toLowerCase() === 'false') return false;
+  // 不再看 MAIL_ENABLED：配了 SMTP_HOST + MAIL_FROM 就发，没配就跳过。
   return Boolean(cfg(env, 'SMTP_HOST')) && Boolean(cfg(env, 'MAIL_FROM'));
 }
 

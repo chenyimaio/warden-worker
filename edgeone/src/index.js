@@ -412,37 +412,21 @@ app.post('/api/accounts/password-hint', async (c) => {
       //   sealed        -> 直接发库里的密文记录，邮件通道里没有明文；
       //                    收件人需要 HINT_ENCRYPTION_SECRET +
       //                    scripts/decrypt-hint.mjs 才能解开
-      const mode = String(envGet(c, 'HINT_EMAIL_MODE', 'plain')).toLowerCase();
-      const sealedMode = mode === 'sealed' && hintEncryptionEnabled(c.env);
-      const store = getStore(c.env);
+      // 邮件形式由 HINT_ENCRYPTION_SECRET 决定：
+      //   配了密钥 -> 邮件里发密文（收件人用 scripts/decrypt-hint.mjs 解）
+      //   没配     -> 邮件里发明文
+      // 存储侧始终保留明文（见 hint.js buildHintFields），加密只发生在发信这一刻。
+      const secretEnabled = hintEncryptionEnabled(c.env);
 
-      if (sealedMode) {
-        const prof = (await store.get(keys.profile(user.id)))?.value;
-        let rec = prof?.masterPasswordHintEnc ?? null;
-        if (!rec) {
-          // 旧账号：库里还是明文，没有密文可发。就地加密一份再发，
-          // 顺手把库里的明文升级成密文（这样下次直接命中上面的分支）。
-          const plain = ((await readHintValue(c.env, user)) ?? '').trim();
-          if (plain) {
-            rec = await encryptHint(c.env, plain);
-            if (prof) {
-              await store.put(keys.profile(user.id), {
-                ...prof,
-                masterPasswordHint: null,
-                masterPasswordHintEnc: rec,
-              });
-            }
-          }
-        }
-        if (rec) {
-          await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
-        } else {
-          console.warn('[hint] sealed mode: no hint stored for', user.id);
-        }
+      const plain = ((await readHintValue(c.env, user)) ?? '').trim();
+      if (!plain) {
+        console.warn('[hint] no hint stored for', user.id);
+      } else if (secretEnabled) {
+        // 现场加密：保证邮件里的密文一定匹配当前 HINT_ENCRYPTION_SECRET
+        const rec = await encryptHint(c.env, plain);
+        await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
       } else {
-        const hint = ((await readHintValue(c.env, user)) ?? '').trim();
-        if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
-        else console.warn('[hint] plain mode: no hint stored for', user.id);
+        await sendPasswordHint(c.env, { to: user.email, hint: plain, baseUrl: base });
       }
     }
   } catch (e) {
@@ -1451,7 +1435,8 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 
 async function uploadAttachmentBytes(c) {
   // 和文件 Send 一样：EdgeOne 单次请求体上限约 6MB，超了平台会直接 500。
-  const platformMax = Number(envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  // UPLOAD_MAX_BYTES 同时管附件和文件 Send（旧的 ATTACHMENT_MAX_BYTES 仍兼容读取）。
+  const platformMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', envGet(c, 'ATTACHMENT_MAX_BYTES', 6 * 1024 * 1024))) || 0;
   const declared = Number(c.req.header('content-length') || 0);
   if (platformMax && declared > platformMax) {
     return c.json(
@@ -1470,8 +1455,7 @@ async function uploadAttachmentBytes(c) {
   const up = await readUpload(c);
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
-  const maxBytes = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
-  if (maxBytes && bytes.length > maxBytes) return c.json({ error: 'Attachment too large' }, 413);
+  if (platformMax && bytes.length > platformMax) return c.json({ error: 'Attachment too large', limit: platformMax }, 413);
 
   await store.putBinary(keys.attachmentData(a.claims.sub, aid), bytes);
   await mutate(store, keys.attachmentMeta(a.claims.sub, aid), (cur) =>
@@ -1995,7 +1979,7 @@ async function uploadSendFile(c) {
   // EdgeOne 对单次请求体有硬上限（实测 6MB 可以、7MB 直接被平台拦成 500
   // INTERNAL_CLOUD_FUNCTION_INVOCATION_FAILED）。提前用 Content-Length 拦掉，
   // 给客户端一个明确的 413，而不是让它看到 500。
-  const maxBytes = Number(envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  const maxBytes = Number(envGet(c, 'UPLOAD_MAX_BYTES', envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024))) || 0;
   const declared = Number(c.req.header('content-length') || 0);
   if (maxBytes && declared > maxBytes) {
     console.warn('[send-upload] rejected by content-length', declared);
@@ -2057,10 +2041,8 @@ async function uploadSendFile(c) {
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
-  const attachmentMax = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
-  const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
-  if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
-    return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
+  if (maxBytes && bytes.length > maxBytes) {
+    return c.json({ error: `File too large: ${(maxBytes / 1024 / 1024).toFixed(1)} MB max`, limit: maxBytes }, 413);
   }
 
   try {

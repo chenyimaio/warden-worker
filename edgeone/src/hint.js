@@ -99,8 +99,8 @@ export async function readHintValue(env, profile) {
 export async function buildHintFields(env, plaintext) {
   const text = plaintext == null ? '' : String(plaintext).trim();
   if (!text) return { masterPasswordHint: null, masterPasswordHintEnc: null };
-  if (!hintEncryptionEnabled(env)) {
-    return { masterPasswordHint: text, masterPasswordHintEnc: null };
-  }
-  return { masterPasswordHint: null, masterPasswordHintEnc: await encryptHint(env, text) };
+  // 存储侧按「可信」处理：明文落库，方便运维排查与迁移。
+  // HINT_ENCRYPTION_SECRET 只决定**邮件里发密文还是明文**（见 index.js 的 password-hint 路由）。
+  // 老数据里可能还留着 masterPasswordHintEnc，读取路径仍然兼容（readHintValue）。
+  return { masterPasswordHint: text, masterPasswordHintEnc: null };
 }

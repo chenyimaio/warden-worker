@@ -17609,7 +17609,6 @@ function cfg(env, name, dflt) {
   return env?.[name] ?? process.env[name] ?? dflt;
 }
 function mailConfigured(env) {
-  if (String(cfg(env, "MAIL_ENABLED", "true")).toLowerCase() === "false") return false;
   return Boolean(cfg(env, "SMTP_HOST")) && Boolean(cfg(env, "MAIL_FROM"));
 }
 function transport(env) {
@@ -17778,10 +17777,7 @@ async function readHintValue(env, profile) {
 async function buildHintFields(env, plaintext) {
   const text = plaintext == null ? "" : String(plaintext).trim();
   if (!text) return { masterPasswordHint: null, masterPasswordHintEnc: null };
-  if (!hintEncryptionEnabled(env)) {
-    return { masterPasswordHint: text, masterPasswordHintEnc: null };
-  }
-  return { masterPasswordHint: null, masterPasswordHintEnc: await encryptHint(env, text) };
+  return { masterPasswordHint: text, masterPasswordHintEnc: null };
 }
 
 // src/upload.js
@@ -18169,34 +18165,15 @@ app.post("/api/accounts/password-hint", async (c) => {
     const user = email ? await findUserByEmail(c, email) : null;
     if (user) {
       const base = String(envGet(c, "BASE_URL", new URL(c.req.url).origin));
-      const mode = String(envGet(c, "HINT_EMAIL_MODE", "plain")).toLowerCase();
-      const sealedMode = mode === "sealed" && hintEncryptionEnabled(c.env);
-      const store = getStore2(c.env);
-      if (sealedMode) {
-        const prof = (await store.get(keys.profile(user.id)))?.value;
-        let rec = prof?.masterPasswordHintEnc ?? null;
-        if (!rec) {
-          const plain = (await readHintValue(c.env, user) ?? "").trim();
-          if (plain) {
-            rec = await encryptHint(c.env, plain);
-            if (prof) {
-              await store.put(keys.profile(user.id), {
-                ...prof,
-                masterPasswordHint: null,
-                masterPasswordHintEnc: rec
-              });
-            }
-          }
-        }
-        if (rec) {
-          await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
-        } else {
-          console.warn("[hint] sealed mode: no hint stored for", user.id);
-        }
+      const secretEnabled = hintEncryptionEnabled(c.env);
+      const plain = (await readHintValue(c.env, user) ?? "").trim();
+      if (!plain) {
+        console.warn("[hint] no hint stored for", user.id);
+      } else if (secretEnabled) {
+        const rec = await encryptHint(c.env, plain);
+        await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
       } else {
-        const hint = (await readHintValue(c.env, user) ?? "").trim();
-        if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
-        else console.warn("[hint] plain mode: no hint stored for", user.id);
+        await sendPasswordHint(c.env, { to: user.email, hint: plain, baseUrl: base });
       }
     }
   } catch (e) {
@@ -19094,7 +19071,7 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   });
 });
 async function uploadAttachmentBytes(c) {
-  const platformMax = Number(envGet(c, "SEND_UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  const platformMax = Number(envGet(c, "UPLOAD_MAX_BYTES", envGet(c, "ATTACHMENT_MAX_BYTES", 6 * 1024 * 1024))) || 0;
   const declared = Number(c.req.header("content-length") || 0);
   if (platformMax && declared > platformMax) {
     return c.json(
@@ -19111,8 +19088,7 @@ async function uploadAttachmentBytes(c) {
   const up = await readUpload(c);
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
-  const maxBytes = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
-  if (maxBytes && bytes.length > maxBytes) return c.json({ error: "Attachment too large" }, 413);
+  if (platformMax && bytes.length > platformMax) return c.json({ error: "Attachment too large", limit: platformMax }, 413);
   await store.putBinary(keys.attachmentData(a.claims.sub, aid), bytes);
   await mutate(
     store,
@@ -19565,7 +19541,7 @@ app.post("/api/sends/file/v2", async (c) => {
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
   const id = c.req.param("id");
-  const maxBytes = Number(envGet(c, "SEND_UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  const maxBytes = Number(envGet(c, "UPLOAD_MAX_BYTES", envGet(c, "SEND_UPLOAD_MAX_BYTES", 6 * 1024 * 1024))) || 0;
   const declared = Number(c.req.header("content-length") || 0);
   if (maxBytes && declared > maxBytes) {
     console.warn("[send-upload] rejected by content-length", declared);
@@ -19611,10 +19587,8 @@ async function uploadSendFile(c) {
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
-  const attachmentMax = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
-  const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
-  if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
-    return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
+  if (maxBytes && bytes.length > maxBytes) {
+    return c.json({ error: `File too large: ${(maxBytes / 1024 / 1024).toFixed(1)} MB max`, limit: maxBytes }, 413);
   }
   try {
     await store.putBinary(keys.sendFile(userId, id), bytes);
