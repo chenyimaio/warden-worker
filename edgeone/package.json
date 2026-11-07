@@ -1,0 +1,29 @@
+{
+  "name": "warden-edgeone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "node src/dev.js",
+    "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/mail.js",
+    "smoke": "node scripts/smoke.mjs",
+    "accept": "node scripts/acceptance.mjs",
+    "parity": "node scripts/route-parity.mjs --strict",
+    "test:blob": "node scripts/blob-adapter-test.mjs",
+    "doc": "node scripts/doc-check.mjs",
+    "test:smtp": "node scripts/test-smtp.mjs",
+    "blob:selftest": "node scripts/blob-selftest.mjs"
+  },
+  "dependencies": {
+    "@edgeone/pages-blob": "^0.0.19",
+    "hono": "^4.6.0",
+    "jose": "^5.9.0",
+    "nodemailer": "^6.9.0"
+  },
+  "devDependencies": {
+    "@hono/node-server": "^1.13.0"
+  }
+}

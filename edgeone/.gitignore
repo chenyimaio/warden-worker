@@ -1,0 +1,7 @@
+node_modules/
+.npm-cache/
+.env
+*.log
+.DS_Store
+src/*.damaged
+src/*.repaired.js

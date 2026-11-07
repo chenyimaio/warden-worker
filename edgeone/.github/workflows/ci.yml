@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 路由对齐校验要读上游 router.rs
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          repository: qaz741wsd856/warden-worker
+          path: vendor/warden-worker
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci || npm install
+      - name: 语法检查
+        run: npm run check
+      - name: 端到端冒烟
+        run: npm run smoke
+      - name: 路由对齐（0 缺口）
+        run: npm run parity
+      - name: Blob 适配契约
+        run: npm run test:blob
+      - name: 文档漂移
+        run: npm run doc
