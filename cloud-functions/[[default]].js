@@ -19515,27 +19515,17 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
+  const uploadToken = await signAccess(c.env, {
+    sub: "send-upload",
+    sid: accessIdFromUuid(id),
+    scope: ["api.send.upload"]
+  });
   return c.json({
     sendResponse: sendToJson(send),
-    // 1 = Direct：客户端会把加密后的字节 POST 到下面的 url（multipart 或裸字节）。
-    // 之前写 0（Azure）会让客户端按 Blob SAS 协议 PUT，我们没有 Azure 后端，上传必然失败。
+    // 1 = Direct：客户端会把加密后的字节 POST/PUT 到下面的 url（multipart 或裸字节）。
     fileUploadType: 1,
-    url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}`
+    url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}?token=${encodeURIComponent(uploadToken)}`
   });
-});
-async function diagPut(c, entry) {
-  try {
-    const store = getStore2(c.env);
-    const key = `diag/upload/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-    await store.put(key, { ts: nowIso(), ...entry });
-  } catch (_) {
-  }
-}
-app.get("/api/diag-7f3a91/uploads", async (c) => {
-  const store = getStore2(c.env);
-  const idx = await store.list("diag/upload/");
-  const rows = await mapLimit(idx.slice(-12), 8, async (it) => (await store.get(it.key))?.value);
-  return c.json({ items: rows.filter(Boolean), object: "list" });
 });
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
@@ -19553,30 +19543,22 @@ async function uploadSendFile(c) {
     );
   }
   const a = await requireAuth(c);
-  if (a.error) {
-    let head = null;
-    let bodyLen = null;
-    try {
-      const raw2 = Buffer.from(await c.req.arrayBuffer());
-      bodyLen = raw2.length;
-      head = raw2.subarray(0, 48).toString("latin1");
-    } catch (e) {
-      head = `<unreadable: ${String(e?.message || e).slice(0, 80)}>`;
+  let userId = a.error ? null : a.claims.sub;
+  if (!userId) {
+    const signed = String(c.req.query("token") ?? "");
+    if (signed) {
+      try {
+        const payload = await verifyAccess(c.env, signed);
+        const expectSid = accessIdFromUuid(id);
+        if (Array.isArray(payload.scope) && payload.scope.includes("api.send.upload") && String(payload.sid) === expectSid) {
+          const idx = (await store.get(keys.sendIndex(expectSid)))?.value;
+          if (idx) userId = idx.userId;
+        }
+      } catch {
+      }
     }
-    console.warn("[send-upload] unauthenticated upload rejected", c.req.path);
-    await diagPut(c, {
-      stage: "unauthenticated",
-      path: c.req.path,
-      method: c.req.method,
-      contentType: c.req.header("content-type") ?? null,
-      contentLength: c.req.header("content-length") ?? null,
-      bodyLen,
-      head,
-      message: "missing or invalid bearer token"
-    });
-    return a.error;
   }
-  const userId = a.claims.sub;
+  if (!userId) return a.error;
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: "not found" }, 404);
   let up;
@@ -19584,52 +19566,26 @@ async function uploadSendFile(c) {
     up = await readUpload(c);
   } catch (e) {
     const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
-    if (existing) {
-      console.warn("[send-upload] duplicate invocation, bytes already stored", existing.length);
-      await diagPut(c, {
-        stage: "duplicate",
-        path: c.req.path,
-        size: existing.length,
-        message: String(e?.message || e).slice(0, 200)
-      });
-      return c.json(sendToJson(send), 200);
-    }
-    console.error("[send-upload] readUpload failed", c.req.header("content-type"), e?.message || e);
-    await diagPut(c, {
-      stage: "readUpload",
-      path: c.req.path,
-      contentType: c.req.header("content-type") ?? null,
-      message: String(e?.message || e).slice(0, 300)
-    });
+    if (existing) return c.json(sendToJson(send), 200);
+    console.error("[send-upload] read body failed", e?.message || e);
     return c.json({ error: "failed to read upload body" }, 400);
   }
   if (up.error) {
     const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
-    if (existing) {
-      console.warn("[send-upload] no file part but bytes already stored", existing.length);
-      await diagPut(c, { stage: "duplicate", path: c.req.path, size: existing.length, message: up.error });
-      return c.json(sendToJson(send), 200);
-    }
+    if (existing) return c.json(sendToJson(send), 200);
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
   const attachmentMax = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
   const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
   if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
-    console.warn("[send-upload] rejected after read", bytes.length);
     return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
   }
   try {
     await store.putBinary(keys.sendFile(userId, id), bytes);
   } catch (e) {
-    console.error("[send-upload] putBinary failed", bytes.length, e?.message || e);
-    await diagPut(c, {
-      stage: "putBinary",
-      path: c.req.path,
-      size: bytes.length,
-      message: String(e?.message || e).slice(0, 300)
-    });
-    return c.json({ error: "failed to store file", size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
+    console.error("[send-upload] store failed", bytes.length, e?.message || e);
+    return c.json({ error: "failed to store file" }, 500);
   }
   const next = await mutate(
     store,
@@ -19646,8 +19602,7 @@ async function uploadSendFile(c) {
   } catch (e) {
     console.warn("[send-upload] touchUser failed", e?.message || e);
   }
-  await diagPut(c, { stage: "ok", path: c.req.path, method: c.req.method, contentType: c.req.header("content-type") ?? null, size: bytes.length, fileName: up.fileName ?? null });
-  return c.json(sendToJson(next), 200);
+  return c.json(sendToJson(next));
 }
 app.post("/api/sends/:id/file/:fileId", uploadSendFile);
 app.put("/api/sends/:id/file/:fileId", uploadSendFile);

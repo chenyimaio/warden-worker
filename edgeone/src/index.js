@@ -1930,45 +1930,29 @@ app.post('/api/sends/file/v2', async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
+  // 上传地址是「预签名 URL」：客户端（Android 走的是 Azure 风格直传）会直接
+  // 把加密字节 PUT 到这个地址，不带 Authorization。所以把一次性的签名放进查询串，
+  // 服务端在 uploadSendFile 里校验它 —— 等价于 Azure SAS 的思路。
+  const uploadToken = await signAccess(c.env, {
+    sub: 'send-upload',
+    sid: accessIdFromUuid(id),
+    scope: ['api.send.upload'],
+  });
+
   return c.json({
     sendResponse: sendToJson(send),
-    // 1 = Direct：客户端会把加密后的字节 POST 到下面的 url（multipart 或裸字节）。
-    // 之前写 0（Azure）会让客户端按 Blob SAS 协议 PUT，我们没有 Azure 后端，上传必然失败。
+    // 1 = Direct：客户端会把加密后的字节 POST/PUT 到下面的 url（multipart 或裸字节）。
     fileUploadType: 1,
-    url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}`,
+    url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}?token=${encodeURIComponent(uploadToken)}`,
   });
 });
 
-// 临时诊断：记录最近几次上传的结果/异常（不含任何凭据），
-// 便于在拿不到 Functions stdout 时定位问题。看完可以删掉。
-async function diagPut(c, entry) {
-  try {
-    const store = getStore(c.env);
-    const key = `diag/upload/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-    await store.put(key, { ts: nowIso(), ...entry });
-  } catch (_) {
-    /* 诊断本身失败不影响主流程 */
-  }
-}
-
-app.get('/api/diag-7f3a91/uploads', async (c) => {
-  const store = getStore(c.env);
-  const idx = await store.list('diag/upload/');
-  const rows = await mapLimit(idx.slice(-12), 8, async (it) => (await store.get(it.key))?.value);
-  return c.json({ items: rows.filter(Boolean), object: 'list' });
-});
-
-// 文件字节上传：兼容 Direct（multipart / 裸字节）与 Azure 风格（PUT 裸字节）
+// 文件字节上传：兼容 Direct（multipart）与 Azure 风格（PUT 裸字节）。
 //
-// 关于匿名兜底：Bitwarden Android 2026.8 在文件 Send 的第二步（上传字节）上不带
-// Authorization，导致这里恒 401（同一账号的文本 Send 正常）。在客户端修好之前，允许
-// 满足下面条件的「无 token 上传」：
-//   1) URL 里的 id 能通过 accessId 索引反查到 Send（即确实是这台服务器创建的）；
-//   2) 类型是文件 Send；
-//   3) 这个 Send 还没有任何字节（首次写入，不限时间），或者创建时间在 60 分钟内
-//      （覆盖上传失败后的重试，此时字节可能已经写进去了）。
-// 也就是说：任何人都不能覆盖一个「已经有内容、且创建超过 1 小时」的文件 Send。
-// 想完全关掉：环境变量 ALLOW_ANON_SEND_UPLOAD=false。
+// 鉴权两条路：
+//   1) 普通客户端：Authorization: Bearer <access token>
+//   2) 直传客户端（Android 2026.8 走的是 Azure 风格直传）：不带 header，
+//      靠创建文件 Send 时返回的预签名 url 里的 token 授权（绑定该 Send、限时）。
 async function uploadSendFile(c) {
   const store = getStore(c.env);
   const id = c.req.param('id');
@@ -1989,35 +1973,33 @@ async function uploadSendFile(c) {
     );
   }
 
-  // 严格鉴权：文件 Send 的字节上传必须带有效的 access token。
-  // （之前为兼容 Android 2026.8 那条不带 token 的上传做过受限兜底，现已移除。）
+  // 鉴权两条路：
+  //   1) 普通客户端：Authorization: Bearer <access token>
+  //   2) 直传客户端（Android 的 Azure 风格）：不带 header，靠创建时返回的
+  //      预签名 url 里的 token 授权（绑定这个 Send、限时）。
   const a = await requireAuth(c);
-  if (a.error) {
-    // 记录请求形状：multipart 还是裸字节、用的什么方法、body 开头长什么样。
-    // multipart 的 body 会以 "--…" 开头；Azure 风格直传则是随机密文。
-    let head = null;
-    let bodyLen = null;
-    try {
-      const raw = Buffer.from(await c.req.arrayBuffer());
-      bodyLen = raw.length;
-      head = raw.subarray(0, 48).toString('latin1');
-    } catch (e) {
-      head = `<unreadable: ${String(e?.message || e).slice(0, 80)}>`;
+  let userId = a.error ? null : a.claims.sub;
+
+  if (!userId) {
+    const signed = String(c.req.query('token') ?? '');
+    if (signed) {
+      try {
+        const payload = await verifyAccess(c.env, signed);
+        const expectSid = accessIdFromUuid(id);
+        if (
+          Array.isArray(payload.scope) &&
+          payload.scope.includes('api.send.upload') &&
+          String(payload.sid) === expectSid
+        ) {
+          const idx = (await store.get(keys.sendIndex(expectSid)))?.value;
+          if (idx) userId = idx.userId;
+        }
+      } catch {
+        /* 落到下面的 401 */
+      }
     }
-    console.warn('[send-upload] unauthenticated upload rejected', c.req.path);
-    await diagPut(c, {
-      stage: 'unauthenticated',
-      path: c.req.path,
-      method: c.req.method,
-      contentType: c.req.header('content-type') ?? null,
-      contentLength: c.req.header('content-length') ?? null,
-      bodyLen,
-      head,
-      message: 'missing or invalid bearer token',
-    });
-    return a.error;
   }
-  const userId = a.claims.sub;
+  if (!userId) return a.error;
 
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: 'not found' }, 404);
@@ -2030,53 +2012,27 @@ async function uploadSendFile(c) {
     // already been read"）。如果字节其实已经存好了，就当成功返回，否则客户端会误判失败
     // 并删掉这个 Send。
     const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
-    if (existing) {
-      console.warn('[send-upload] duplicate invocation, bytes already stored', existing.length);
-      await diagPut(c, {
-        stage: 'duplicate',
-        path: c.req.path,
-        size: existing.length,
-        message: String(e?.message || e).slice(0, 200),
-      });
-      return c.json(sendToJson(send), 200);
-    }
-    console.error('[send-upload] readUpload failed', c.req.header('content-type'), e?.message || e);
-    await diagPut(c, {
-      stage: 'readUpload',
-      path: c.req.path,
-      contentType: c.req.header('content-type') ?? null,
-      message: String(e?.message || e).slice(0, 300),
-    });
+    if (existing) return c.json(sendToJson(send), 200);
+    console.error('[send-upload] read body failed', e?.message || e);
     return c.json({ error: 'failed to read upload body' }, 400);
   }
   if (up.error) {
     const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
-    if (existing) {
-      console.warn('[send-upload] no file part but bytes already stored', existing.length);
-      await diagPut(c, { stage: 'duplicate', path: c.req.path, size: existing.length, message: up.error });
-      return c.json(sendToJson(send), 200);
-    }
+    if (existing) return c.json(sendToJson(send), 200);
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
   const attachmentMax = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
   const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
   if (Number.isFinite(effectiveMax) && bytes.length > effectiveMax) {
-    console.warn('[send-upload] rejected after read', bytes.length);
     return c.json({ error: `File too large: ${(effectiveMax / 1024 / 1024).toFixed(1)} MB max`, limit: effectiveMax }, 413);
   }
 
   try {
     await store.putBinary(keys.sendFile(userId, id), bytes);
   } catch (e) {
-    console.error('[send-upload] putBinary failed', bytes.length, e?.message || e);
-    await diagPut(c, {
-      stage: 'putBinary',
-      path: c.req.path,
-      size: bytes.length,
-      message: String(e?.message || e).slice(0, 300),
-    });
-    return c.json({ error: 'failed to store file', size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
+    console.error('[send-upload] store failed', bytes.length, e?.message || e);
+    return c.json({ error: 'failed to store file' }, 500);
   }
   const next = await mutate(store, keys.send(userId, id), (cur) =>
     cur
@@ -2094,10 +2050,7 @@ async function uploadSendFile(c) {
   } catch (e) {
     console.warn('[send-upload] touchUser failed', e?.message || e);
   }
-  await diagPut(c, { stage: 'ok', path: c.req.path, method: c.req.method, contentType: c.req.header('content-type') ?? null, size: bytes.length, fileName: up.fileName ?? null });
-  // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
-  //   200 = 带 token 的正常上传；201 = 走了匿名兜底。
-  return c.json(sendToJson(next), 200);
+  return c.json(sendToJson(next));
 }
 app.post('/api/sends/:id/file/:fileId', uploadSendFile);
 app.put('/api/sends/:id/file/:fileId', uploadSendFile);

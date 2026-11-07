@@ -534,7 +534,7 @@ r = await call('POST', '/api/sends/file/v2', {
 const fsId = r.data?.sendResponse?.id;
 check('创建文件 Send（返回 sendResponse + url）', r.status === 200 && !!fsId && !!r.data?.url, r);
 check('fileUploadType=1（Direct，客户端才会 POST 到 url）', r.data?.fileUploadType === 1, r.data?.fileUploadType);
-check('upload url 指向本服务 /api/sends/{id}/file/{id}', String(r.data?.url).endsWith(`/api/sends/${fsId}/file/${fsId}`), r.data?.url);
+check('upload url 指向本服务 /api/sends/{id}/file/{id}（带签名）', String(r.data?.url).includes(`/api/sends/${fsId}/file/${fsId}?token=`), r.data?.url);
 
 r = await call('POST', `/api/sends/${fsId}/file/${fsId}`, { token: access5, raw: Buffer.from('world') });
 check('上传文件 Send 字节', r.status === 200, r);
