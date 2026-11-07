@@ -2,6 +2,17 @@
 
 This project provides a self-hosted, Bitwarden-compatible server that can be deployed to Cloudflare Workers for free. It's designed to be low-maintenance, allowing you to "deploy and forget" without worrying about server management or recurring costs.
 
+> ### EdgeOne Makers 移植版（Node.js）
+>
+> 本仓库的 [`edgeone/`](edgeone/) 目录是把后端重写到 **腾讯云 EdgeOne Makers（国内站）** 的版本：
+> Cloud Functions (Node.js) + Makers Blob 存储 + 项目内直连 SMTP。
+>
+> 文档：[edgeone/README.md](edgeone/README.md) · 部署手册：[edgeone/docs/DEPLOY.md](edgeone/docs/DEPLOY.md)
+>
+> [![Deploy with EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+>
+> 图片没显示时，直接打开：[一键部署链接](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+
 ## Why another Bitwarden server?
 
 While projects like [Vaultwarden](https://github.com/dani-garcia/vaultwarden) provide excellent self-hosted solutions, they still require you to manage a server or VPS. This can be a hassle, and if you forget to pay for your server, you could lose access to your passwords.
