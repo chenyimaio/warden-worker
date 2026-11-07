@@ -20118,6 +20118,8 @@ app.all(
 );
 var exported = new Hono3();
 exported.use("*", cors());
+exported.get("/", (c) => c.redirect("/vault/", 302));
+exported.get("/index.html", (c) => c.redirect("/vault/", 302));
 exported.route("/vault", app);
 exported.route("/", app);
 var index_default = exported;

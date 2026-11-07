@@ -32,6 +32,9 @@ const log = (...a) => console.log('[web-vault]', ...a);
 const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 if (!enabled) {
+  // 落地页已删除，public/ 里没有别的东西；这里保证输出目录存在，
+  // 否则 EdgeOne 会因为「输出目录不存在」直接判定构建失败。
+  mkdirSync(OUT_DIR, { recursive: true });
   log('WEB_VAULT_ENABLED=false，跳过下载');
   process.exit(0);
 }
