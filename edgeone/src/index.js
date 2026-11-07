@@ -27,7 +27,7 @@ import {
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
 import { sendPasswordHint, mailConfigured } from './mail.js';
-import { readHintValue, buildHintFields } from './hint.js';
+import { readHintValue, buildHintFields, hintEncryptionEnabled } from './hint.js';
 import { readUpload } from './upload.js';
 
 const app = new Hono();
@@ -405,10 +405,24 @@ app.post('/api/accounts/password-hint', async (c) => {
   //  200
   try {
     const user = email ? await findUserByEmail(c, email) : null;
-    const hint = ((await readHintValue(c.env, user)) ?? '').trim();
-    if (user && hint) {
+    if (user) {
       const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
-      await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+      // HINT_EMAIL_MODE:
+      //   plain（默认） -> 解密后发明文，收到就能用
+      //   sealed        -> 直接发库里的密文记录，邮件通道里没有明文；
+      //                    收件人需要 HINT_ENCRYPTION_SECRET +
+      //                    scripts/decrypt-hint.mjs 才能解开
+      const mode = String(envGet(c, 'HINT_EMAIL_MODE', 'plain')).toLowerCase();
+      if (mode === 'sealed' && hintEncryptionEnabled(c.env)) {
+        const prof = (await getStore(c.env).get(keys.profile(user.id)))?.value;
+        const rec = prof?.masterPasswordHintEnc;
+        if (rec) {
+          await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
+        }
+      } else {
+        const hint = ((await readHintValue(c.env, user)) ?? '').trim();
+        if (hint) await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+      }
     }
   } catch (e) {
     console.error('[hint] send failed', e?.message || e);

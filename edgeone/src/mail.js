@@ -52,19 +52,34 @@ const escapeHtml = (s) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-export function passwordHintTemplate({ hint, baseUrl }) {
+export function passwordHintTemplate({ hint, sealed, baseUrl }) {
   const base = String(baseUrl || '').replace(/\/+$/, '');
-  const safeHint = String(hint).slice(0, 1000);
-  const subject = '主密码提示 / Your master password hint';
+  const isSealed = sealed != null && String(sealed).trim() !== '';
+  const body = String(isSealed ? sealed : hint).slice(0, 4000);
+  const subject = isSealed
+    ? '主密码提示（已加密）/ Encrypted master password hint'
+    : '主密码提示 / Your master password hint';
+
+  const intro = isSealed
+    ? [
+        '这是你的密码库主密码提示，已用服务器的 HINT_ENCRYPTION_SECRET 加密后发送。',
+        '',
+        '解密方式（在仓库里执行，不需要联网）：',
+        "    node edgeone/scripts/decrypt-hint.mjs --secret '<HINT_ENCRYPTION_SECRET>'",
+        '然后把下面这段作为 --record 传入（或直接粘贴到标准输入）。',
+      ].join('\n')
+    : '这是你的密码库主密码提示（master password hint）：';
 
   const text = [
     '你好，',
     '',
-    '这是你的密码库主密码提示（master password hint）：',
+    intro,
     '',
-    `    ${safeHint}`,
+    `    ${body}`,
     '',
-    '提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。',
+    isSealed
+      ? '没有 HINT_ENCRYPTION_SECRET 时这段内容无法解开；请把它和密钥分开保存。'
+      : '提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。',
     '如果你没有请求过该提示，请忽略这封邮件，账户不会有任何变化。',
     '',
     base ? `登录：${base}` : '',
@@ -76,9 +91,9 @@ export function passwordHintTemplate({ hint, baseUrl }) {
 
   const html = `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2328">
 <p>你好，</p>
-<p>这是你的密码库主密码提示（master password hint）：</p>
-<pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:14px">${escapeHtml(safeHint)}</pre>
-<p style="color:#57606a">提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。如果你没有请求过该提示，请忽略这封邮件。</p>
+<p>${escapeHtml(intro).replace(/\n/g, '<br>')}</p>
+<pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:13px">${escapeHtml(body)}</pre>
+<p style="color:#57606a">${isSealed ? '没有 HINT_ENCRYPTION_SECRET 时这段内容无法解开；请把它和密钥分开保存。' : '提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。'}如果你没有请求过该提示，请忽略这封邮件。</p>
 ${base ? `<p><a href="${escapeHtml(base)}">${escapeHtml(base)}</a></p>` : ''}
 <p style="color:#57606a;font-size:13px">— Warden</p>
 </div>`;
@@ -111,7 +126,7 @@ export async function sendMail(env, { to, subject, text, html }) {
   return { messageId: info.messageId, response: info.response };
 }
 
-export async function sendPasswordHint(env, { to, hint, baseUrl }) {
-  const { subject, text, html } = passwordHintTemplate({ hint, baseUrl });
+export async function sendPasswordHint(env, { to, hint, sealed, baseUrl }) {
+  const { subject, text, html } = passwordHintTemplate({ hint, sealed, baseUrl });
   return sendMail(env, { to, subject, text, html });
 }
