@@ -19553,26 +19553,30 @@ async function uploadSendFile(c) {
     );
   }
   const a = await requireAuth(c);
-  let userId;
-  let anonUpload = false;
   if (a.error) {
-    const allowAnon = String(envGet(c, "ALLOW_ANON_SEND_UPLOAD", "true")).toLowerCase() !== "false";
-    if (!allowAnon) return a.error;
-    const hit = (await store.get(keys.sendIndex(accessIdFromUuid(id))))?.value;
-    const candidate = hit ? (await store.get(keys.send(hit.userId, hit.id)))?.value : null;
-    const isFileSend = Boolean(candidate) && Number(candidate.type) === SEND_FILE;
-    const empty = isFileSend ? !await store.getBinary(keys.sendFile(hit.userId, candidate.id)) : false;
-    const recent = isFileSend && Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1e3;
-    if (!isFileSend || !(empty || recent)) {
-      console.warn("[send-upload] rejected unauthenticated upload", c.req.path, JSON.stringify({ isFileSend, empty, recent }));
-      return a.error;
+    let head = null;
+    let bodyLen = null;
+    try {
+      const raw2 = Buffer.from(await c.req.arrayBuffer());
+      bodyLen = raw2.length;
+      head = raw2.subarray(0, 48).toString("latin1");
+    } catch (e) {
+      head = `<unreadable: ${String(e?.message || e).slice(0, 80)}>`;
     }
-    console.warn("[send-upload] accepted unauthenticated upload", c.req.path, JSON.stringify({ empty, recent }));
-    userId = hit.userId;
-    anonUpload = true;
-  } else {
-    userId = a.claims.sub;
+    console.warn("[send-upload] unauthenticated upload rejected", c.req.path);
+    await diagPut(c, {
+      stage: "unauthenticated",
+      path: c.req.path,
+      method: c.req.method,
+      contentType: c.req.header("content-type") ?? null,
+      contentLength: c.req.header("content-length") ?? null,
+      bodyLen,
+      head,
+      message: "missing or invalid bearer token"
+    });
+    return a.error;
   }
+  const userId = a.claims.sub;
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: "not found" }, 404);
   let up;
@@ -19623,7 +19627,6 @@ async function uploadSendFile(c) {
       stage: "putBinary",
       path: c.req.path,
       size: bytes.length,
-      anon: anonUpload,
       message: String(e?.message || e).slice(0, 300)
     });
     return c.json({ error: "failed to store file", size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
@@ -19643,8 +19646,8 @@ async function uploadSendFile(c) {
   } catch (e) {
     console.warn("[send-upload] touchUser failed", e?.message || e);
   }
-  await diagPut(c, { stage: "ok", path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
-  return c.json(sendToJson(next), anonUpload ? 201 : 200);
+  await diagPut(c, { stage: "ok", path: c.req.path, method: c.req.method, contentType: c.req.header("content-type") ?? null, size: bytes.length, fileName: up.fileName ?? null });
+  return c.json(sendToJson(next), 200);
 }
 app.post("/api/sends/:id/file/:fileId", uploadSendFile);
 app.put("/api/sends/:id/file/:fileId", uploadSendFile);

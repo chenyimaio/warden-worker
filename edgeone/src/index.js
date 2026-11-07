@@ -1989,30 +1989,35 @@ async function uploadSendFile(c) {
     );
   }
 
+  // 严格鉴权：文件 Send 的字节上传必须带有效的 access token。
+  // （之前为兼容 Android 2026.8 那条不带 token 的上传做过受限兜底，现已移除。）
   const a = await requireAuth(c);
-
-  let userId;
-  let anonUpload = false;
   if (a.error) {
-    const allowAnon = String(envGet(c, 'ALLOW_ANON_SEND_UPLOAD', 'true')).toLowerCase() !== 'false';
-    if (!allowAnon) return a.error;
-
-    const hit = (await store.get(keys.sendIndex(accessIdFromUuid(id))))?.value;
-    const candidate = hit ? (await store.get(keys.send(hit.userId, hit.id)))?.value : null;
-    const isFileSend = Boolean(candidate) && Number(candidate.type) === SEND_FILE;
-    const empty = isFileSend ? !(await store.getBinary(keys.sendFile(hit.userId, candidate.id))) : false;
-    const recent = isFileSend && Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1000;
-
-    if (!isFileSend || !(empty || recent)) {
-      console.warn('[send-upload] rejected unauthenticated upload', c.req.path, JSON.stringify({ isFileSend, empty, recent }));
-      return a.error;
+    // 记录请求形状：multipart 还是裸字节、用的什么方法、body 开头长什么样。
+    // multipart 的 body 会以 "--…" 开头；Azure 风格直传则是随机密文。
+    let head = null;
+    let bodyLen = null;
+    try {
+      const raw = Buffer.from(await c.req.arrayBuffer());
+      bodyLen = raw.length;
+      head = raw.subarray(0, 48).toString('latin1');
+    } catch (e) {
+      head = `<unreadable: ${String(e?.message || e).slice(0, 80)}>`;
     }
-    console.warn('[send-upload] accepted unauthenticated upload', c.req.path, JSON.stringify({ empty, recent }));
-    userId = hit.userId;
-    anonUpload = true;
-  } else {
-    userId = a.claims.sub;
+    console.warn('[send-upload] unauthenticated upload rejected', c.req.path);
+    await diagPut(c, {
+      stage: 'unauthenticated',
+      path: c.req.path,
+      method: c.req.method,
+      contentType: c.req.header('content-type') ?? null,
+      contentLength: c.req.header('content-length') ?? null,
+      bodyLen,
+      head,
+      message: 'missing or invalid bearer token',
+    });
+    return a.error;
   }
+  const userId = a.claims.sub;
 
   const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: 'not found' }, 404);
@@ -2069,7 +2074,6 @@ async function uploadSendFile(c) {
       stage: 'putBinary',
       path: c.req.path,
       size: bytes.length,
-      anon: anonUpload,
       message: String(e?.message || e).slice(0, 300),
     });
     return c.json({ error: 'failed to store file', size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
@@ -2090,10 +2094,10 @@ async function uploadSendFile(c) {
   } catch (e) {
     console.warn('[send-upload] touchUser failed', e?.message || e);
   }
-  await diagPut(c, { stage: 'ok', path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
+  await diagPut(c, { stage: 'ok', path: c.req.path, method: c.req.method, contentType: c.req.header('content-type') ?? null, size: bytes.length, fileName: up.fileName ?? null });
   // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
   //   200 = 带 token 的正常上传；201 = 走了匿名兜底。
-  return c.json(sendToJson(next), anonUpload ? 201 : 200);
+  return c.json(sendToJson(next), 200);
 }
 app.post('/api/sends/:id/file/:fileId', uploadSendFile);
 app.put('/api/sends/:id/file/:fileId', uploadSendFile);
