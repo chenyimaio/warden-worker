@@ -7,6 +7,25 @@
 > EdgeOne 的 Edge Functions 只支持 JS、CPU 200 ms、body 1 MB，没有 SQL、没有 Durable Object、没有 cron，
 > 而 warden-worker 的 `D1 + do + worker-build` 全部依赖这些特性。
 
+[![Deploy with EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+
+## 一键部署（Makers）
+
+点上面的按钮 → Makers 会导入仓库、预填安装命令和 13 个环境变量名，逐个填值即可。
+
+手动建项目时的构建配置：
+
+| 项 | 值 |
+|---|---|
+| 根目录 | `edgeone` |
+| 安装命令 | `npm ci` |
+| 构建命令 | `npm run build`（no-op，仓库已定义） |
+| 输出目录 | 留空（纯函数项目） |
+| Node 版本 | `20.18.0`（`edgeone.json` 已指定） |
+| 函数入口 | 自动：`cloud-functions/{api,identity,notifications}/[[default]].js` |
+
+环境变量清单与验收步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
+
 ## 目录
 
 ```

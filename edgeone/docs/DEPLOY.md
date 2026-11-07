@@ -29,41 +29,67 @@ npm run parity     # 路由对齐（0 缺口）
 npm run test:blob  # Blob 适配契约
 ```
 
-## 2. 建 Makers 项目
+## 2. 建 Makers 项目（一键部署）
 
-1. 控制台 → Makers → 新建项目 → 导入 Git 仓库
-2. 框架：**其他 / Node.js**
-3. 构建命令：`npm ci --omit=dev`（没有构建产物，纯 ESM）
-4. 启动/入口：`src/makers.js`
-
-> `src/makers.js` 同时导出了 `default(request,env,ctx)`、`default.fetch`、`onRequest`、`fetch` 四种形态，
-> 控制台模板不管是哪一种都能接上；如果模板要求别的形状，只改这一个文件。
-
-## 3. 绑路由
-
-在 Functions 里把下面两条路由指向该函数：
+Makers 支持 **Deploy Button**：点一下就把仓库导入成项目，参数都带在 URL 上。
 
 ```
-/api/*
-/identity/*
+https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME
 ```
 
-`/notifications/*` 不要绑（返回 426，客户端会自动回退到轮询 `/api/sync`）。
+参数含义：
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `repository-url` | `.../warden-worker/tree/edgeone` | 指定分支；Makers 支持 `tree/<branch>` |
+| `root-directory` | `edgeone` | 代码在仓库子目录，必须指定 |
+| `install-command` | `npm ci` | 有 `package-lock.json`，用 ci 可复现 |
+| `env` | 13 个变量名 | 部署向导会逐个让你填值 |
+
+手动建项目时填这三项：
+
+| 构建配置项 | 值 |
+|---|---|
+| 安装命令 | `npm ci` |
+| 构建命令 | `npm run build`（实际是 no-op，仓库里已定义） |
+| 输出目录 | 留空（纯函数项目，没有静态产物） |
+| 根目录 / Root Directory | `edgeone` |
+| Node 版本 | `20.18.0`（`edgeone.json` 里已指定） |
+
+## 3. 函数入口（文件路由，不用手动绑路由）
+
+Makers 的 Node.js 函数按**目录结构**生成路由，仓库里已经放好：
+
+```
+edgeone/cloud-functions/
+├── api/[[default]].js           -> /api/*
+├── identity/[[default]].js      -> /identity/*
+└── notifications/[[default]].js -> /notifications/*   (返回 426，客户端回退轮询)
+```
+
+每个文件都是一行转发到 `../../src/makers.js`，而 `src/makers.js` 兼容 Makers 的
+`onRequest(context)` 调用形态（`context.request` + `process.env`），也兼容直接传 `Request`。
+
+> 本地可以先验证这套入口：`node scripts/test-entry.mjs`（6 项，不依赖 Makers）。
 
 ## 4. 环境变量
 
+在 **项目 → 项目设置 → 环境变量** 里加（部署向导也会让你填）。密钥类建议用加密变量。
+
 | 变量 | 值 |
 |---|---|
-| `BASE_URL` | `https://vault.example.com` |
+| `BASE_URL` | `https://vault.example.com`（必须与最终域名一致） |
 | `ALLOWED_EMAILS` | `*@example.com`（留空 = 关闭注册） |
-| `JWT_SECRET` | 随机 32+ 字节 |
+| `JWT_SECRET` | 随机 32+ 字节，例如 `openssl rand -hex 32` |
 | `JWT_REFRESH_SECRET` | 另一个随机 32+ 字节 |
 | `STORE_DRIVER` | `blob` |
-| `BLOB_STORE` | `warden` |
+| `BLOB_STORE` | `warden`（首次调用自动创建命名空间） |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | `smtp.qcloudmail.com` / `465` / `true` |
-| `SMTP_USER` / `SMTP_PASS` | 发信账号 |
+| `SMTP_USER` / `SMTP_PASS` | 发信账号 / 授权码 |
 | `MAIL_FROM` / `MAIL_FROM_NAME` | `no-reply@example.com` / `Warden` |
 | `PASSWORD_ITERATIONS` | `600000`（可省） |
+
+> 环境变量改动后必须**重新部署**才生效（Makers 不会热加载）。
 
 ## 5. 部署后按顺序验收
 

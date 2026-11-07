@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "node src/dev.js",
+    "build": "node -e \"console.log('no build step: pure ESM functions')\"",
     "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/mail.js",
     "smoke": "node scripts/smoke.mjs",
     "accept": "node scripts/acceptance.mjs",
