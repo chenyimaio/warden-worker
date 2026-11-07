@@ -25,6 +25,24 @@ export function sanitizeProfile(input, { hint, now = new Date().toISOString() } 
   const p = { ...(input ?? {}) };
   const notes = [];
 
+  // 0) 已启用加密存储：脚本不持有密钥，不要动它
+  if (p.masterPasswordHintEnc) {
+    if (hint !== undefined) {
+      notes.push('该账号的提示是加密存储的，脚本无法重新加密；请改用 PUT /api/accounts/profile 修改');
+      return { profile: p, notes, refused: true };
+    }
+    notes.push('提示为加密存储（masterPasswordHintEnc），保持原样');
+    for (const k of ['createdAt', 'updatedAt']) {
+      const v = p[k];
+      if (typeof v !== 'string' || !ISO.test(v) || Number.isNaN(Date.parse(v))) {
+        notes.push(`${k} 非法（${JSON.stringify(v)}）→ 重置为当前时间`);
+        p[k] = now;
+      }
+    }
+    delete p[''];
+    return { profile: p, notes };
+  }
+
   // 1) 取出提示
   let found = null;
   for (const k of ['masterPasswordHint', 'masterPasswordHintB64', '']) {
@@ -99,7 +117,14 @@ async function main() {
     process.exit(1);
   }
 
-  const { profile, notes } = sanitizeProfile(cur.value, { hint });
+  const { profile, notes, refused } = sanitizeProfile(cur.value, { hint });
+  if (refused) {
+    console.log(`账号:   ${email}`);
+    console.log(`对象:   ${key}`);
+    console.log(`\n${notes.map((n) => '• ' + n).join('\n')}`);
+    console.log('\n未写入。');
+    process.exit(3);
+  }
 
   console.log(`账号:   ${email}`);
   console.log(`对象:   ${key}`);

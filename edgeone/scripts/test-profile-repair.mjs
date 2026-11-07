@@ -49,5 +49,14 @@ check('--hint "" 清空', r.profile.masterPasswordHint === null, r.profile.maste
 r = sanitizeProfile({ ...base, masterPasswordHint: 'ok' });
 check('正常对象无需变更', r.notes.length === 0 && r.profile.masterPasswordHint === 'ok', r.notes);
 
+// 6) 已加密存储：不动提示，且拒绝 --hint
+const enc = { v: 1, kdf: 'argon2id', cipher: 'aes-256-gcm', salt: 's', iv: 'i', tag: 't', ct: 'c' };
+r = sanitizeProfile({ ...base, masterPasswordHint: null, masterPasswordHintEnc: enc });
+check('加密记录保持原样', JSON.stringify(r.profile.masterPasswordHintEnc) === JSON.stringify(enc) && r.profile.masterPasswordHint == null, r.profile);
+r = sanitizeProfile({ ...base, masterPasswordHintEnc: enc }, { hint: 'new' });
+check('加密记录 + --hint 被拒绝', r.refused === true, r.notes);
+r = sanitizeProfile({ ...base, masterPasswordHintEnc: enc, updatedAt: 'bad' });
+check('加密记录下仍能修时间', !r.profile.updatedAt.includes('bad') && r.profile.masterPasswordHintEnc, r.profile.updatedAt);
+
 console.log(failed ? `\n${failed} failed` : '\n全部通过');
 process.exit(failed ? 1 : 0);

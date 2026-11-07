@@ -167,6 +167,8 @@ curl -s -X POST localhost:8787/api/accounts/password-hint \
 | `MAIL_FROM` / `MAIL_FROM_NAME` | ✅ | 发信人，必须是已验证的发信域名 |
 | `MAIL_DRY_RUN` | ⬜ | `true` 时只打日志不发信，本地联调用 |
 | `MAIL_ENABLED` | ⬜ | `false` 关闭全部发信（缺省开启） |
+| `WEB_VAULT_ENABLED` | ⬜ | 默认 `true`：根路径跳 `/vault/`（官方网页版）；`false` 只显示落地页。**关闭后 Send 分享链接仍会转到 `/vault/` 渲染** |
+| `HINT_ENCRYPTION_SECRET` | ⬜ | 默认 `*` = 主密码提示明文存储；设为任意随机串则用 **Argon2id 派生密钥 + AES-256-GCM** 加密存储。**启用后不可更换/丢失** |
 | `PORT` | ⬜ | 仅 `src/dev.js` 本地调试用，默认 8787 |
 | `ATTACHMENT_MAX_BYTES` | ⬜ | 单附件上限，超了返 413 |
 | `ALLOW_TOTP_DRIFT` | ⬜ | 默认 `true`，允许 TOTP ±1 步 |
