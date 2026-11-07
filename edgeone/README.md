@@ -26,6 +26,25 @@
 
 环境变量清单与验收步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
+### 国内站 / 国际站两条入口
+
+| 站点 | 入口 | 方式 |
+|---|---|---|
+| 国际站 `edgeone.ai` | 点上面的 Deploy 按钮 | 一键部署，参数都带在 URL 上 |
+| 国内站 `makers.edgeone.link` | [Makers 控制台](https://console.cloud.tencent.com/edgeone/makers) → 新建项目 → 导入 Git 仓库 | 手动填下面 5 项 |
+
+国内站没有 `pages/new?...` 这种带参链接（`makers.edgeone.link/new` 是 404），只能在控制台里填：
+
+```
+分支        edgeone
+根目录      edgeone
+安装命令    npm ci
+构建命令    npm run build
+输出目录    （留空）
+```
+
+两边用的是同一套代码和同一份 `edgeone.json`，环境变量也完全一样。
+
 ## 目录
 
 ```

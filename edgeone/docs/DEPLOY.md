@@ -29,9 +29,13 @@ npm run parity     # 路由对齐（0 缺口）
 npm run test:blob  # Blob 适配契约
 ```
 
-## 2. 建 Makers 项目（一键部署）
+## 2. 建 Makers 项目（两条入口）
 
-Makers 支持 **Deploy Button**：点一下就把仓库导入成项目，参数都带在 URL 上。
+**国际站**：Makers 支持 **Deploy Button**，点一下就把仓库导入成项目，参数都带在 URL 上。
+
+**国内站**：`makers.edgeone.link` 没有带参的一键链接（试过 `/new`、`/pages/new` 都是 404），
+走 [Makers 控制台](https://console.cloud.tencent.com/edgeone/makers) → 新建项目 → 导入 Git 仓库，
+按下表填即可。两边代码、`edgeone.json`、环境变量完全一样。
 
 ```
 https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME
