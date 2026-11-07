@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node src/dev.js",
-    "build": "node -e \"console.log('no build step: pure ESM functions')\"",
+    "build": "node scripts/build-makes.mjs",
     "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/mail.js",
     "smoke": "node scripts/smoke.mjs",
     "accept": "node scripts/acceptance.mjs",
@@ -25,6 +25,7 @@
     "nodemailer": "^6.9.0"
   },
   "devDependencies": {
-    "@hono/node-server": "^1.13.0"
+    "@hono/node-server": "^1.13.0",
+    "esbuild": "^0.28.2"
   }
 }
