@@ -3,22 +3,55 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Warden · EdgeOne Makers</title>
+    <title>Warden · Bitwarden 兼容服务器</title>
     <style>
-      body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 640px; margin: 80px auto; padding: 0 20px; color: #1f2328; line-height: 1.7; }
-      code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; }
-      .ok { color: #1a7f37; font-weight: 600; }
+      :root { color-scheme: light; }
+      body {
+        font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+        max-width: 680px; margin: 72px auto; padding: 0 24px; color: #1f2328; line-height: 1.75;
+      }
+      h1 { font-size: 26px; margin: 0 0 4px; }
+      .sub { color: #57606a; margin: 0 0 32px; }
+      h2 { font-size: 16px; margin: 32px 0 10px; }
+      code, .addr { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 2px 8px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+      .addr { display: inline-block; font-size: 15px; padding: 6px 10px; }
+      ol { padding-left: 20px; }
+      li { margin: 6px 0; }
       a { color: #0969da; }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .dot { color: #1a7f37; font-weight: 600; }
+      footer { margin-top: 48px; color: #57606a; font-size: 13px; }
     </style>
   </head>
   <body>
     <h1>Warden</h1>
-    <p class="ok">服务已部署。</p>
-    <p>这是 Bitwarden 兼容后端，API 在 <code>/api/*</code> 与 <code>/identity/*</code>。</p>
-    <ul>
-      <li>健康检查：<a href="/api/alive">/api/alive</a></li>
-      <li>服务配置：<a href="/api/config">/api/config</a></li>
-    </ul>
-    <p>在 Bitwarden 客户端里把服务器地址填成当前域名即可登录。</p>
+    <p class="sub">Bitwarden 兼容服务器 · EdgeOne Makers 部署</p>
+
+    <h2>用官方客户端连接</h2>
+    <p>不需要网页版，直接用 Bitwarden 的浏览器扩展 / 手机 / 桌面客户端，把「服务器地址」填成：</p>
+    <p><span class="addr" id="addr">https://vault.ifyi.top</span></p>
+    <p class="row">
+      客户端下载：
+      <a href="https://bitwarden.com/download/" target="_blank" rel="noreferrer">bitwarden.com/download</a>
+    </p>
+
+    <h2>步骤</h2>
+    <ol>
+      <li>安装 Bitwarden 客户端（Chrome/Firefox 扩展、Android、iOS、桌面版均可）</li>
+      <li>登录页点「设置」→「自托管环境」，填入上面的服务器地址</li>
+      <li>注册账号（需在服务器白名单内），或直接用已有账号登录</li>
+    </ol>
+
+    <h2>服务状态</h2>
+    <p>健康检查：<a href="/api/alive">/api/alive</a> · 服务配置：<a href="/api/config">/api/config</a></p>
+    <p class="dot">API 正常</p>
+
+    <footer>
+      数据存储于 Cloudflare/EdgeOne 边缘对象存储，主密码与库内容端到端加密，服务端不可读。
+    </footer>
+
+    <script>
+      document.getElementById('addr').textContent = location.origin;
+    </script>
   </body>
 </html>
