@@ -68,7 +68,7 @@ r = await req('POST', '/api/accounts/register', {
     email,
     name: 'Acceptance',
     masterPasswordHash: mph,
-    key: 'k-acc',
+    userSymmetricKey: 'k-acc',
     userAsymmetricKeys: { encryptedPrivateKey: 'priv-acc', publicKey: 'pub-acc' },
     kdf: 0,
     kdfIterations: 600000,

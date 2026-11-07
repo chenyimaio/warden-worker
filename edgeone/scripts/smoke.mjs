@@ -62,7 +62,7 @@ r = await call('POST', '/api/accounts/register', {
     email,
     name: 'Smoke',
     masterPasswordHash: mph,
-    key: 'user-key',
+    userSymmetricKey: 'user-key',
     userAsymmetricKeys: { encryptedPrivateKey: 'priv', publicKey: 'pub' },
     kdf: 0,
     kdfIterations: 600000,

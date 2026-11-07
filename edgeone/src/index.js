@@ -325,6 +325,13 @@ async function register(c) {
   const masterPasswordHash = String(p.masterPasswordHash ?? p.masterPasswordHashB64 ?? '');
   if (!masterPasswordHash) return c.json({ error: 'missing masterPasswordHash' }, 400);
 
+  // 真实客户端（Android/iOS/Web）用的是 userSymmetricKey + userAsymmetricKeys，
+  // 兼容旧字段名 key / keys，否则会把空串写进 key 字段，客户端解密时直接报
+  // "EncString error, Invalid symmetric type, got type 0 with 1 parts"。
+  const userSymmetricKey = String(p.userSymmetricKey ?? p.key ?? '');
+  if (!userSymmetricKey) return c.json({ error: 'missing userSymmetricKey' }, 400);
+  const asym = p.userAsymmetricKeys ?? p.keys ?? {};
+
   const user = {
     id,
     email,
@@ -334,9 +341,9 @@ async function register(c) {
     passwordSalt: salt,
     passwordIterations: iterations,
     masterPasswordHint: p.masterPasswordHint ?? null,
-    key: String(p.key ?? ''),
-    privateKey: String(p.userAsymmetricKeys?.encryptedPrivateKey ?? ''),
-    publicKey: String(p.userAsymmetricKeys?.publicKey ?? ''),
+    key: userSymmetricKey,
+    privateKey: String(asym.encryptedPrivateKey ?? ''),
+    publicKey: String(asym.publicKey ?? ''),
     kdfType: Number(p.kdf ?? 0),
     kdfIterations: Number(p.kdfIterations ?? 600000),
     kdfMemory: p.kdfMemory ?? null,
