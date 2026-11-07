@@ -19477,19 +19477,22 @@ async function uploadSendFile(c) {
   const id = c.req.param("id");
   const a = await requireAuth(c);
   let userId;
+  let anonUpload = false;
   if (a.error) {
     const allowAnon = String(envGet(c, "ALLOW_ANON_SEND_UPLOAD", "true")).toLowerCase() !== "false";
     if (!allowAnon) return a.error;
     const hit = (await store.get(keys.sendIndex(accessIdFromUuid(id))))?.value;
     const candidate = hit ? (await store.get(keys.send(hit.userId, hit.id)))?.value : null;
-    const fresh = Boolean(candidate) && Number(candidate.type) === SEND_FILE && Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1e3;
-    const empty = fresh ? !await store.getBinary(keys.sendFile(hit.userId, candidate.id)) : false;
-    if (!fresh || !empty) {
-      console.warn("[send-upload] rejected unauthenticated upload", c.req.path, JSON.stringify({ fresh, empty }));
+    const isFileSend = Boolean(candidate) && Number(candidate.type) === SEND_FILE;
+    const empty = isFileSend ? !await store.getBinary(keys.sendFile(hit.userId, candidate.id)) : false;
+    const recent = isFileSend && Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1e3;
+    if (!isFileSend || !(empty || recent)) {
+      console.warn("[send-upload] rejected unauthenticated upload", c.req.path, JSON.stringify({ isFileSend, empty, recent }));
       return a.error;
     }
-    console.warn("[send-upload] accepted unauthenticated upload", c.req.path);
+    console.warn("[send-upload] accepted unauthenticated upload", c.req.path, JSON.stringify({ empty, recent }));
     userId = hit.userId;
+    anonUpload = true;
   } else {
     userId = a.claims.sub;
   }
@@ -19511,7 +19514,7 @@ async function uploadSendFile(c) {
     } : void 0
   );
   await touchUser(store, userId);
-  return c.json(sendToJson(next));
+  return c.json(sendToJson(next), anonUpload ? 201 : 200);
 }
 app.post("/api/sends/:id/file/:fileId", uploadSendFile);
 app.put("/api/sends/:id/file/:fileId", uploadSendFile);

@@ -1888,37 +1888,39 @@ app.post('/api/sends/file/v2', async (c) => {
 
 // 文件字节上传：兼容 Direct（multipart / 裸字节）与 Azure 风格（PUT 裸字节）
 //
-// 关于匿名兜底：Bitwarden Android 2026.8 在文件 Send 的第二步（上传字节）上偶发不带
-// Authorization，导致这里恒 401（同一账号的文本 Send 正常）。为了不把功能卡死，允许
-// 满足下面全部条件的「无 token 上传」：
-//   1) URL 里的 id 能通过 accessId 索引反查到 Send（即确实是本机创建的）；
-//   2) 类型是文件 Send，且创建时间在 60 分钟内；
-//   3) 这个 Send 还没有任何字节（只能写第一次，之后必须带 token）。
-// 想关掉：环境变量 ALLOW_ANON_SEND_UPLOAD=false。
+// 关于匿名兜底：Bitwarden Android 2026.8 在文件 Send 的第二步（上传字节）上不带
+// Authorization，导致这里恒 401（同一账号的文本 Send 正常）。在客户端修好之前，允许
+// 满足下面条件的「无 token 上传」：
+//   1) URL 里的 id 能通过 accessId 索引反查到 Send（即确实是这台服务器创建的）；
+//   2) 类型是文件 Send；
+//   3) 这个 Send 还没有任何字节（首次写入，不限时间），或者创建时间在 60 分钟内
+//      （覆盖上传失败后的重试，此时字节可能已经写进去了）。
+// 也就是说：任何人都不能覆盖一个「已经有内容、且创建超过 1 小时」的文件 Send。
+// 想完全关掉：环境变量 ALLOW_ANON_SEND_UPLOAD=false。
 async function uploadSendFile(c) {
   const store = getStore(c.env);
   const id = c.req.param('id');
   const a = await requireAuth(c);
 
   let userId;
+  let anonUpload = false;
   if (a.error) {
     const allowAnon = String(envGet(c, 'ALLOW_ANON_SEND_UPLOAD', 'true')).toLowerCase() !== 'false';
     if (!allowAnon) return a.error;
 
     const hit = (await store.get(keys.sendIndex(accessIdFromUuid(id))))?.value;
     const candidate = hit ? (await store.get(keys.send(hit.userId, hit.id)))?.value : null;
-    const fresh =
-      Boolean(candidate) &&
-      Number(candidate.type) === SEND_FILE &&
-      Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1000;
-    const empty = fresh ? !(await store.getBinary(keys.sendFile(hit.userId, candidate.id))) : false;
+    const isFileSend = Boolean(candidate) && Number(candidate.type) === SEND_FILE;
+    const empty = isFileSend ? !(await store.getBinary(keys.sendFile(hit.userId, candidate.id))) : false;
+    const recent = isFileSend && Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1000;
 
-    if (!fresh || !empty) {
-      console.warn('[send-upload] rejected unauthenticated upload', c.req.path, JSON.stringify({ fresh, empty }));
+    if (!isFileSend || !(empty || recent)) {
+      console.warn('[send-upload] rejected unauthenticated upload', c.req.path, JSON.stringify({ isFileSend, empty, recent }));
       return a.error;
     }
-    console.warn('[send-upload] accepted unauthenticated upload', c.req.path);
+    console.warn('[send-upload] accepted unauthenticated upload', c.req.path, JSON.stringify({ empty, recent }));
     userId = hit.userId;
+    anonUpload = true;
   } else {
     userId = a.claims.sub;
   }
@@ -1943,7 +1945,9 @@ async function uploadSendFile(c) {
       : undefined,
   );
   await touchUser(store, userId);
-  return c.json(sendToJson(next));
+  // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
+  //   200 = 带 token 的正常上传；201 = 走了匿名兜底。
+  return c.json(sendToJson(next), anonUpload ? 201 : 200);
 }
 app.post('/api/sends/:id/file/:fileId', uploadSendFile);
 app.put('/api/sends/:id/file/:fileId', uploadSendFile);
