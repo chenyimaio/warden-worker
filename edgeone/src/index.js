@@ -28,6 +28,7 @@ import {
 import { getStore, keys, mutate } from './store.js';
 import { sendPasswordHint, mailConfigured } from './mail.js';
 import { readHintValue, buildHintFields } from './hint.js';
+import { readUpload } from './upload.js';
 
 const app = new Hono();
 app.use('*', cors());
@@ -1387,16 +1388,7 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 });
 
 // multipart2 /
-async function readUpload(c) {
-  const ct = c.req.header('content-type') || '';
-  if (ct.includes('multipart/form-data')) {
-    const fd = await c.req.parseBody();
-    const file = Object.values(fd).find((v) => v && typeof v === 'object' && 'arrayBuffer' in v);
-    if (!file) return { error: 'no file part' };
-    return { bytes: Buffer.from(await file.arrayBuffer()), fields: fd };
-  }
-  return { bytes: Buffer.from(await c.req.arrayBuffer()), fields: {} };
-}
+// readUpload 已移到 ./upload.js（手工 multipart 解析，见该文件顶部说明）
 
 async function uploadAttachmentBytes(c) {
   const a = await requireAuth(c);

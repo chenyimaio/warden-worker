@@ -17766,6 +17766,64 @@ async function buildHintFields(env, plaintext) {
   return { masterPasswordHint: null, masterPasswordHintEnc: await encryptHint(env, text) };
 }
 
+// src/upload.js
+var CR = 13;
+var LF = 10;
+var DASH = 45;
+async function readUpload(c) {
+  const ct = c.req.header("content-type") || "";
+  const raw2 = Buffer.from(await c.req.arrayBuffer());
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ct);
+  if (!ct.toLowerCase().includes("multipart/form-data") || !m) {
+    return { bytes: raw2, fields: {} };
+  }
+  const boundary = (m[1] ?? m[2]).trim();
+  const delim = Buffer.from(`--${boundary}`);
+  const fields = {};
+  let pos = raw2.indexOf(delim);
+  let fileBytes = null;
+  let fileName = null;
+  while (pos !== -1) {
+    let start = pos + delim.length;
+    if (raw2[start] === DASH && raw2[start + 1] === DASH) break;
+    if (raw2[start] === CR && raw2[start + 1] === LF) start += 2;
+    const headEnd = raw2.indexOf("\r\n\r\n", start);
+    if (headEnd === -1) break;
+    const headers = raw2.subarray(start, headEnd).toString("utf8");
+    const bodyStart = headEnd + 4;
+    const next = raw2.indexOf(delim, bodyStart);
+    if (next === -1) break;
+    let bodyEnd = next;
+    if (bodyEnd - 2 >= bodyStart && raw2[bodyEnd - 2] === CR && raw2[bodyEnd - 1] === LF) {
+      bodyEnd -= 2;
+    }
+    const bytes = raw2.subarray(bodyStart, bodyEnd);
+    const name = /name="([^"]*)"/i.exec(headers)?.[1];
+    const filename = /filename="([^"]*)"/i.exec(headers)?.[1];
+    if (filename !== void 0) {
+      if (fileBytes === null) {
+        fileBytes = bytes;
+        fileName = filename;
+      }
+    } else if (name) {
+      fields[name] = bytes.toString("utf8");
+    }
+    pos = next;
+  }
+  if (fileBytes === null) {
+    console.warn(
+      "[upload] no file part",
+      JSON.stringify({
+        contentType: ct,
+        length: raw2.length,
+        head: raw2.subarray(0, 64).toString("latin1")
+      })
+    );
+    return { error: "no file part" };
+  }
+  return { bytes: fileBytes, fields, fileName };
+}
+
 // src/index.js
 var app = new Hono3();
 app.use("*", cors());
@@ -18967,16 +19025,6 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     url: `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`
   });
 });
-async function readUpload(c) {
-  const ct = c.req.header("content-type") || "";
-  if (ct.includes("multipart/form-data")) {
-    const fd = await c.req.parseBody();
-    const file = Object.values(fd).find((v) => v && typeof v === "object" && "arrayBuffer" in v);
-    if (!file) return { error: "no file part" };
-    return { bytes: Buffer.from(await file.arrayBuffer()), fields: fd };
-  }
-  return { bytes: Buffer.from(await c.req.arrayBuffer()), fields: {} };
-}
 async function uploadAttachmentBytes(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
