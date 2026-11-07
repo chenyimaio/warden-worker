@@ -97,6 +97,20 @@ async function limit(c, kind, id, max, windowSec) {
   return null;
 }
 
+// 主密码提示的取值：不同客户端/版本用过的字段名不止一个，
+// 个别情况下还会把值塞进空字符串键（历史数据兼容），统一在这里收口。
+const HINT_KEYS = ['masterPasswordHint', 'masterPasswordHintB64', ''];
+function readHint(p) {
+  for (const k of HINT_KEYS) {
+    if (p && Object.prototype.hasOwnProperty.call(p, k)) {
+      const v = p[k];
+      return v == null ? null : String(v);
+    }
+  }
+  return null;
+}
+const hasHintField = (p) => HINT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(p ?? {}, k));
+
 async function requireAuth(c) {
   const m = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
   if (!m) return { error: c.json({ error: 'unauthorized' }, 401) };
@@ -340,7 +354,7 @@ async function register(c) {
     masterPasswordHash: hashPassword(masterPasswordHash, salt, iterations),
     passwordSalt: salt,
     passwordIterations: iterations,
-    masterPasswordHint: p.masterPasswordHint ?? null,
+    masterPasswordHint: readHint(p) || null,
     key: userSymmetricKey,
     privateKey: String(asym.encryptedPrivateKey ?? ''),
     publicKey: String(asym.publicKey ?? ''),
@@ -376,7 +390,7 @@ app.post('/api/accounts/password-hint', async (c) => {
   //  200
   try {
     const user = email ? await findUserByEmail(c, email) : null;
-    const hint = user?.masterPasswordHint?.trim?.() ?? '';
+    const hint = (user?.masterPasswordHint ?? user?.[''] ?? '').toString().trim();
     if (user && hint) {
       const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
@@ -643,10 +657,9 @@ async function updateProfile(c) {
       name: p.name ?? cur.name,
       avatarColor: p.avatarColor ?? cur.avatarColor,
       // 允许单独改主密码提示（传空串/null 表示清除）；不传则保持原值
-      masterPasswordHint:
-        p.masterPasswordHint === undefined
-          ? cur.masterPasswordHint
-          : String(p.masterPasswordHint || '').trim() || null,
+      masterPasswordHint: hasHintField(p)
+        ? String(readHint(p) ?? '').trim() || null
+        : cur.masterPasswordHint,
       updatedAt: nowIso(),
     };
   });
@@ -1182,7 +1195,7 @@ app.post('/api/accounts/password', async (c) => {
           passwordSalt: salt,
           passwordIterations: iterations,
           key: p.key ?? cur.key,
-          masterPasswordHint: p.masterPasswordHint ?? cur.masterPasswordHint,
+          masterPasswordHint: hasHintField(p) ? readHint(p) || null : cur.masterPasswordHint,
           securityStamp: stamp,
           updatedAt: nowIso(),
         }
