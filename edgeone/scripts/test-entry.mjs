@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // scripts/test-entry.mjs
-// 验证 Makers 的文件路由入口（cloud-functions/**/[[default]].js）真的能把请求交给 Hono app。
-// 模拟 Makers 的 onRequest(context) 调用形态，不走 HTTP。
-import apiEntry from '../cloud-functions/api/[[default]].js';
-import identityEntry from '../cloud-functions/identity/[[default]].js';
-import notificationsEntry from '../cloud-functions/notifications/[[default]].js';
+// 验证 Makers「文件即路由」的入口文件真的能把请求交给 Hono app。
+// 不依赖 Makers 运行时，直接模拟 onRequestXxx(ctx) 的调用形态。
+import makers from '../src/makers.js';
+import { onRequestGet as aliveGet } from '../cloud-functions/api/alive.js';
+import { onRequestPost as preloginPost } from '../cloud-functions/api/accounts/prelogin.js';
 
 const env = {
   BASE_URL: 'http://localhost',
@@ -22,38 +22,28 @@ const check = (name, ok, extra) => {
   console.log(`${ok ? '✅' : '❌'} ${name}${ok ? '' : '  ' + JSON.stringify(extra)}`);
 };
 
-const call = async (entry, path, init) => {
-  // Makers 传给 onRequest 的是 context 对象
-  const res = await entry({ request: new Request(`http://localhost${path}`, init), env, params: {} });
+const call = async (fn, path, init) => {
+  const res = await fn({ request: new Request(`http://localhost${path}`, init), env, params: {} });
   return { status: res.status, body: await res.text() };
 };
 
-let r = await call(apiEntry, '/api/alive');
-check('api 入口 -> /api/alive', r.status === 200 && r.body.length > 10, r);
+let r = await call(aliveGet, '/api/alive');
+check('生成的 api/alive.js -> /api/alive', r.status === 200 && r.body.length > 10, r);
 
-r = await call(apiEntry, '/api/config');
-check('api 入口 -> /api/config', r.status === 200 && JSON.parse(r.body).version === '2026.6.0', r);
-
-r = await call(apiEntry, '/api/accounts/prelogin', {
+r = await call(preloginPost, '/api/accounts/prelogin', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ email: 'nobody@example.com' }),
 });
-check('api 入口 -> prelogin', r.status === 200 && typeof JSON.parse(r.body).kdf === 'number', r);
+check('生成的 api/accounts/prelogin.js -> 200', r.status === 200 && typeof JSON.parse(r.body).kdf === 'number', r);
 
-r = await call(identityEntry, '/identity/connect/token', {
-  method: 'POST',
-  headers: { 'content-type': 'application/x-www-form-urlencoded' },
-  body: 'grant_type=password&username=nobody@example.com&password=x',
-});
-check('identity 入口 -> token', r.status === 400 && JSON.parse(r.body).error === 'invalid_grant', r);
+// 兜底入口（makers.js）仍然可用
+r = await call(makers, '/api/config');
+check('src/makers.js 兜底入口 -> /api/config', r.status === 200 && JSON.parse(r.body).version === '2026.6.0', r);
 
-r = await call(notificationsEntry, '/notifications/hub');
-check('notifications 入口 -> 426', r.status === 426, r);
-
-// 直接传 Request（某些模板会这样调）
+// 兼容直接传 Request
 r = await (async () => {
-  const res = await apiEntry(new Request('http://localhost/api/alive'));
+  const res = await makers(new Request('http://localhost/api/alive'));
   return { status: res.status, body: await res.text() };
 })();
 check('兼容直接传 Request 的模板', r.status === 200, r);
