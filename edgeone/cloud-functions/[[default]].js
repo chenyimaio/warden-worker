@@ -19546,6 +19546,17 @@ async function uploadSendFile(c) {
   try {
     up = await readUpload(c);
   } catch (e) {
+    const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
+    if (existing) {
+      console.warn("[send-upload] duplicate invocation, bytes already stored", existing.length);
+      await diagPut(c, {
+        stage: "duplicate",
+        path: c.req.path,
+        size: existing.length,
+        message: String(e?.message || e).slice(0, 200)
+      });
+      return c.json(sendToJson(send), 200);
+    }
     console.error("[send-upload] readUpload failed", c.req.header("content-type"), e?.message || e);
     await diagPut(c, {
       stage: "readUpload",
@@ -19555,7 +19566,15 @@ async function uploadSendFile(c) {
     });
     return c.json({ error: "failed to read upload body" }, 400);
   }
-  if (up.error) return c.json({ error: up.error }, 400);
+  if (up.error) {
+    const existing = await store.getBinary(keys.sendFile(userId, id)).catch(() => null);
+    if (existing) {
+      console.warn("[send-upload] no file part but bytes already stored", existing.length);
+      await diagPut(c, { stage: "duplicate", path: c.req.path, size: existing.length, message: up.error });
+      return c.json(sendToJson(send), 200);
+    }
+    return c.json({ error: up.error }, 400);
+  }
   const bytes = up.bytes;
   const attachmentMax = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
   const effectiveMax = Math.min(...[maxBytes, attachmentMax].filter((n) => n > 0));
