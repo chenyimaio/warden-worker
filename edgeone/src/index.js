@@ -571,11 +571,30 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     const provided = String(p.password_hash_b64 ?? '');
     const store = getStore(c.env);
     const send = await lookupSendByAccessId(store, accessId);
-    if (!send) return c.json({ error: 'invalid_grant' }, 400);
+    if (!send) {
+      console.warn('[send-access] send not found for accessId', accessId.slice(0, 12) + '…');
+      return c.json({ error: 'invalid_grant', send_access_error_type: 'not_found' }, 400);
+    }
     const v = validateSendAccess(send);
-    if (v.error) return c.json({ error: 'invalid_grant' }, 400);
+    if (v.error) {
+      console.warn('[send-access] rejected', v.error, JSON.stringify({
+        deletionDate: send.deletionDate,
+        expirationDate: send.expirationDate ?? null,
+        accessCount: send.accessCount ?? 0,
+        maxAccessCount: send.maxAccessCount ?? null,
+        disabled: Boolean(send.disabled),
+      }));
+      return c.json({ error: 'invalid_grant', send_access_error_type: 'unavailable' }, 400);
+    }
     if (sendHasPassword(send) && !checkSendPassword(send, provided)) {
-      return c.json({ error: 'invalid_grant' }, 400);
+      console.warn('[send-access] password required/invalid');
+      return c.json(
+        {
+          error: 'invalid_grant',
+          send_access_error_type: provided ? 'password_hash_b64_invalid' : 'password_hash_b64_required',
+        },
+        400,
+      );
     }
     await mutate(store, keys.send(send.userId, send.id), (cur) =>
       cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
@@ -1750,19 +1769,35 @@ app.post('/api/sends/access', async (c) => {
   let payload;
   try {
     payload = await verifyAccess(c.env, token);
-  } catch {
+  } catch (e) {
+    console.warn('[send-access] token rejected', e?.code || e?.message || e, 'hasToken=' + Boolean(token));
     return c.json({ error: 'invalid access token' }, 401);
   }
   if (!Array.isArray(payload.scope) || !payload.scope.includes('api.send.access') || payload.sid == null) {
+    console.warn('[send-access] token scope/sid wrong', JSON.stringify({ scope: payload.scope, sid: payload.sid }));
     return c.json({ error: 'invalid access token' }, 401);
   }
   const store = getStore(c.env);
   const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
-  if (!idx) return c.json({ error: 'Send is not accessible' }, 404);
+  if (!idx) {
+    console.warn('[send-access] index miss for sid', String(payload.sid).slice(0, 12) + '…');
+    return c.json({ error: 'Send is not accessible' }, 404);
+  }
   const send = (await store.get(keys.send(idx.userId, idx.id)))?.value;
-  if (!send) return c.json({ error: 'Send is not accessible' }, 404);
+  if (!send) {
+    console.warn('[send-access] send row missing', idx.id);
+    return c.json({ error: 'Send is not accessible' }, 404);
+  }
   const v = validateSendAccess(send);
-  if (v.error) return c.json({ error: v.error }, v.status);
+  if (v.error) {
+    console.warn('[send-access] unavailable at read', v.error, JSON.stringify({
+      deletionDate: send.deletionDate,
+      expirationDate: send.expirationDate ?? null,
+      accessCount: send.accessCount ?? 0,
+      maxAccessCount: send.maxAccessCount ?? null,
+    }));
+    return c.json({ error: v.error }, v.status);
+  }
   return c.json(sendAccessJson(send));
 });
 
