@@ -2019,7 +2019,12 @@ async function uploadSendFile(c) {
       : undefined,
   );
   if (!next) return c.json({ error: 'send disappeared during upload' }, 409);
-  await touchUser(store, userId);
+  // 字节已经存好，touchUser 只是更新 revision，失败不该让整次上传变成 500。
+  try {
+    await touchUser(store, userId);
+  } catch (e) {
+    console.warn('[send-upload] touchUser failed', e?.message || e);
+  }
   await diagPut(c, { stage: 'ok', path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
   // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
   //   200 = 带 token 的正常上传；201 = 走了匿名兜底。

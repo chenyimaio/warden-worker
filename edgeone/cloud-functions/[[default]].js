@@ -19576,7 +19576,11 @@ async function uploadSendFile(c) {
     } : void 0
   );
   if (!next) return c.json({ error: "send disappeared during upload" }, 409);
-  await touchUser(store, userId);
+  try {
+    await touchUser(store, userId);
+  } catch (e) {
+    console.warn("[send-upload] touchUser failed", e?.message || e);
+  }
   await diagPut(c, { stage: "ok", path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
   return c.json(sendToJson(next), anonUpload ? 201 : 200);
 }
