@@ -115,18 +115,23 @@ const hasHintField = (p) => HINT_KEYS.some((k) => Object.prototype.hasOwnPropert
 
 async function requireAuth(c) {
   const m = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (!m) return { error: c.json({ error: 'unauthorized' }, 401) };
+  if (!m) {
+    // 诊断：区分「客户端没带 token」和「token 无效」，日志里按 path 能对上具体请求。
+    console.warn('[auth] missing bearer', c.req.method, c.req.path, 'auth-header=' + (c.req.header('authorization') ? 'present-but-unparsable' : 'absent'));
+    return { error: c.json({ error: 'unauthorized', reason: 'missing_token' }, 401) };
+  }
   try {
     const claims = await verifyAccess(c.env, m[1]);
     //  /  / security-stamp  access token 
     const prof = await getStore(c.env).get(keys.profile(claims.sub));
     if (!prof || prof.value.securityStamp !== claims.sstamp) {
-      return { error: c.json({ error: 'unauthorized' }, 401) };
+      console.warn('[auth] stamp mismatch', c.req.method, c.req.path, 'sub=' + claims.sub, 'profile=' + Boolean(prof));
+      return { error: c.json({ error: 'unauthorized', reason: 'stamp_mismatch' }, 401) };
     }
     return { claims, user: prof.value, token: m[1] };
   } catch (e) {
-    console.warn('[auth] token rejected:', e?.code || e?.message || e);
-    return { error: c.json({ error: 'unauthorized' }, 401) };
+    console.warn('[auth] token rejected:', c.req.method, c.req.path, e?.code || e?.message || e);
+    return { error: c.json({ error: 'unauthorized', reason: 'bad_token' }, 401) };
   }
 }
 
