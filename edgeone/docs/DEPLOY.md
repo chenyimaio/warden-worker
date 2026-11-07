@@ -63,27 +63,27 @@ https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimai
 
 | 构建配置项 | 值 |
 |---|---|
-| 安装命令 | `npm ci` |
-| 构建命令 | `npm run build`（实际是 no-op，仓库里已定义） |
-| 输出目录 | 留空（纯函数项目，没有静态产物） |
-| 根目录 / Root Directory | `edgeone` |
-| Node 版本 | `20.18.0`（`edgeone.json` 里已指定） |
+| 根目录 / Root Directory | **留空（仓库根）** |
+| 安装命令 | `cd edgeone && npm ci` |
+| 构建命令 | `cd edgeone && npm run build`（esbuild 打包成 `cloud-functions/[[default]].js`） |
+| 输出目录 | `edgeone/public` |
+| Node 版本 | `20.18.0`（根 `edgeone.json` 已指定） |
 
-## 3. 函数入口（文件路由，不用手动绑路由）
-
-Makers 的 Node.js 函数按**目录结构**生成路由，仓库里已经放好：
+## 3. 函数入口（构建产物，不在仓库里）
 
 ```
-edgeone/cloud-functions/
-├── api/[[default]].js           -> /api/*
-├── identity/[[default]].js      -> /identity/*
-└── notifications/[[default]].js -> /notifications/*   (返回 426，客户端回退轮询)
+仓库根/cloud-functions/[[default]].js   ← 占位文件；构建时被 esbuild 打出的完整后端覆盖
 ```
 
-每个文件都是一行转发到 `../../src/makers.js`，而 `src/makers.js` 兼容 Makers 的
-`onRequest(context)` 调用形态（`context.request` + `process.env`），也兼容直接传 `Request`。
+EdgeOne 只在仓库根看到 `cloud-functions/[[default]].js` 时才认为这是"带 Node 后端的项目"，
+否则按纯静态项目构建，`/api/*` 会落到 `index.html`（返回 200 + HTML，看起来像 404）。
 
-> 本地可以先验证这套入口：`node scripts/test-entry.mjs`（6 项，不依赖 Makers）。
+本地验证打包结果：
+
+```bash
+cd edgeone
+OUT=../tmp-bundle.mjs node scripts/build-makes.mjs   # 约 640 KB
+```
 
 ## 4. 环境变量
 

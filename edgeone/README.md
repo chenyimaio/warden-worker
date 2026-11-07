@@ -22,12 +22,15 @@
 
 | 项 | 值 |
 |---|---|
-| 根目录 | `edgeone` |
-| 安装命令 | `npm ci` |
-| 构建命令 | `npm run build`（no-op，仓库已定义） |
-| 输出目录 | 留空（纯函数项目） |
-| Node 版本 | `20.18.0`（`edgeone.json` 已指定） |
-| 函数入口 | 自动：`cloud-functions/{api,identity,notifications}/[[default]].js` |
+| 根目录 | **留空（仓库根）** — 平台只在仓库根识别 `cloud-functions/` |
+| 安装命令 | `cd edgeone && npm ci` |
+| 构建命令 | `cd edgeone && npm run build`（esbuild 打包后端） |
+| 输出目录 | `edgeone/public` |
+| Node 版本 | `20.18.0`（根 `edgeone.json` 已指定） |
+| 函数入口 | `cloud-functions/[[default]].js`（构建时生成，仓库里是占位） |
+
+> **为什么必须是仓库根**：EdgeOne 按仓库内容判断"有没有 Node 后端"。缺 `cloud-functions/[[default]].js` 时它会走
+> 「pure project」模式，`/api/*` 被当成静态路径落到 `index.html`（我们就这么踩过一次 404）。
 
 环境变量清单与验收步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
