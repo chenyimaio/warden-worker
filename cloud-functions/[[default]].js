@@ -19992,7 +19992,11 @@ app.all(
     501
   )
 );
-var index_default = app;
+var exported = new Hono3();
+exported.use("*", cors());
+exported.route("/vault", app);
+exported.route("/", app);
+var index_default = exported;
 
 // src/makers.js
 var handler = async (context) => {

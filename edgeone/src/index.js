@@ -2469,5 +2469,18 @@ app.all('*', (c) =>
   ),
 );
 
+// 网页版部署在 /vault/ 子路径下时，它在拿到 /api/config 之前会用**相对路径**请求：
+//   GET  /vault/api/config
+//   POST /vault/identity/connect/token
+// 这些请求进不到 /api/* 或 /identity/*，于是配置加载失败、客户端退化成相对地址，
+// 最终报 "501 Not Implemented against /vault/identity/connect/token"。
+// 把同一套路由再挂一份到 /vault 下即可；拿到 config 后客户端会改用其中的绝对地址。
+const exported = new Hono();
+exported.use('*', cors());
+// 先挂 /vault：app 里有一条 all('*') 兜底，若先挂根路径会把它也挂到最前面，
+// 导致 /vault/api/config 先被兜底命中（501）。
+exported.route('/vault', app);
+exported.route('/', app);
+
 export { mailConfigured };
-export default app;
+export default exported;
