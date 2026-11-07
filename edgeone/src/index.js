@@ -1896,6 +1896,25 @@ app.post('/api/sends/file/v2', async (c) => {
   });
 });
 
+// 临时诊断：记录最近几次上传的结果/异常（不含任何凭据），
+// 便于在拿不到 Functions stdout 时定位问题。看完可以删掉。
+async function diagPut(c, entry) {
+  try {
+    const store = getStore(c.env);
+    const key = `diag/upload/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+    await store.put(key, { ts: nowIso(), ...entry });
+  } catch (_) {
+    /* 诊断本身失败不影响主流程 */
+  }
+}
+
+app.get('/api/diag-7f3a91/uploads', async (c) => {
+  const store = getStore(c.env);
+  const idx = await store.list('diag/upload/');
+  const rows = await mapLimit(idx.slice(-12), 8, async (it) => (await store.get(it.key))?.value);
+  return c.json({ items: rows.filter(Boolean), object: 'list' });
+});
+
 // 文件字节上传：兼容 Direct（multipart / 裸字节）与 Azure 风格（PUT 裸字节）
 //
 // 关于匿名兜底：Bitwarden Android 2026.8 在文件 Send 的第二步（上传字节）上不带
@@ -1960,6 +1979,12 @@ async function uploadSendFile(c) {
     up = await readUpload(c);
   } catch (e) {
     console.error('[send-upload] readUpload failed', c.req.header('content-type'), e?.message || e);
+    await diagPut(c, {
+      stage: 'readUpload',
+      path: c.req.path,
+      contentType: c.req.header('content-type') ?? null,
+      message: String(e?.message || e).slice(0, 300),
+    });
     return c.json({ error: 'failed to read upload body' }, 400);
   }
   if (up.error) return c.json({ error: up.error }, 400);
@@ -1975,7 +2000,14 @@ async function uploadSendFile(c) {
     await store.putBinary(keys.sendFile(userId, id), bytes);
   } catch (e) {
     console.error('[send-upload] putBinary failed', bytes.length, e?.message || e);
-    return c.json({ error: 'failed to store file', size: bytes.length }, 500);
+    await diagPut(c, {
+      stage: 'putBinary',
+      path: c.req.path,
+      size: bytes.length,
+      anon: anonUpload,
+      message: String(e?.message || e).slice(0, 300),
+    });
+    return c.json({ error: 'failed to store file', size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
   }
   const next = await mutate(store, keys.send(userId, id), (cur) =>
     cur
@@ -1988,6 +2020,7 @@ async function uploadSendFile(c) {
   );
   if (!next) return c.json({ error: 'send disappeared during upload' }, 409);
   await touchUser(store, userId);
+  await diagPut(c, { stage: 'ok', path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
   // 用状态码区分两条路径，方便在 EdgeOne 的请求日志里一眼看出客户端到底带没带 token：
   //   200 = 带 token 的正常上传；201 = 走了匿名兜底。
   return c.json(sendToJson(next), anonUpload ? 201 : 200);

@@ -19480,6 +19480,20 @@ app.post("/api/sends/file/v2", async (c) => {
     url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}`
   });
 });
+async function diagPut(c, entry) {
+  try {
+    const store = getStore2(c.env);
+    const key = `diag/upload/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+    await store.put(key, { ts: nowIso(), ...entry });
+  } catch (_) {
+  }
+}
+app.get("/api/diag-7f3a91/uploads", async (c) => {
+  const store = getStore2(c.env);
+  const idx = await store.list("diag/upload/");
+  const rows = await mapLimit(idx.slice(-12), 8, async (it) => (await store.get(it.key))?.value);
+  return c.json({ items: rows.filter(Boolean), object: "list" });
+});
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
   const id = c.req.param("id");
@@ -19523,6 +19537,12 @@ async function uploadSendFile(c) {
     up = await readUpload(c);
   } catch (e) {
     console.error("[send-upload] readUpload failed", c.req.header("content-type"), e?.message || e);
+    await diagPut(c, {
+      stage: "readUpload",
+      path: c.req.path,
+      contentType: c.req.header("content-type") ?? null,
+      message: String(e?.message || e).slice(0, 300)
+    });
     return c.json({ error: "failed to read upload body" }, 400);
   }
   if (up.error) return c.json({ error: up.error }, 400);
@@ -19537,7 +19557,14 @@ async function uploadSendFile(c) {
     await store.putBinary(keys.sendFile(userId, id), bytes);
   } catch (e) {
     console.error("[send-upload] putBinary failed", bytes.length, e?.message || e);
-    return c.json({ error: "failed to store file", size: bytes.length }, 500);
+    await diagPut(c, {
+      stage: "putBinary",
+      path: c.req.path,
+      size: bytes.length,
+      anon: anonUpload,
+      message: String(e?.message || e).slice(0, 300)
+    });
+    return c.json({ error: "failed to store file", size: bytes.length, detail: String(e?.message || e).slice(0, 200) }, 500);
   }
   const next = await mutate(
     store,
@@ -19550,6 +19577,7 @@ async function uploadSendFile(c) {
   );
   if (!next) return c.json({ error: "send disappeared during upload" }, 409);
   await touchUser(store, userId);
+  await diagPut(c, { stage: "ok", path: c.req.path, size: bytes.length, anon: anonUpload, fileName: up.fileName ?? null });
   return c.json(sendToJson(next), anonUpload ? 201 : 200);
 }
 app.post("/api/sends/:id/file/:fileId", uploadSendFile);
