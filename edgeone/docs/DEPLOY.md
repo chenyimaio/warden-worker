@@ -41,13 +41,13 @@ npm run test:blob  # Blob 适配契约
 国内站完整链接（可直接用）：
 
 ```
-https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME
+https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CUSEREMAIL1%2CUSERPASSWORD1%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE
 ```
 
 如果链接失效，也可以手动建项目，按下表填。两边代码、`edgeone.json`、环境变量完全一样。
 
 ```
-https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME
+https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CUSEREMAIL1%2CUSERPASSWORD1%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE
 ```
 
 参数含义：
@@ -92,15 +92,16 @@ OUT=../tmp-bundle.mjs node scripts/build-makes.mjs   # 约 640 KB
 | 变量 | 值 |
 |---|---|
 | `BASE_URL` | `https://vault.example.com`（必须与最终域名一致） |
-| `ALLOWED_EMAILS` | `*@example.com`（留空 = 关闭注册） |
+| `USEREMAIL1` / `USERPASSWORD1` | 账号邮箱 / **明文主密码**（服务端据此推导 `masterPasswordHash` 校验登录；明文不出网、不落库） |
+| `USEREMAIL2` / `USERPASSWORD2` … | 需要更多账号就继续加序号 |
 | `JWT_SECRET` | 随机 32+ 字节，例如 `openssl rand -hex 32` |
 | `JWT_REFRESH_SECRET` | 另一个随机 32+ 字节 |
 | `STORE_DRIVER` | `blob` |
 | `BLOB_STORE` | `warden`（首次调用自动创建命名空间） |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | `smtp.qcloudmail.com` / `465` / `true` |
-| `SMTP_USER` / `SMTP_PASS` | 发信账号 / 授权码 |
-| `MAIL_FROM` / `MAIL_FROM_NAME` | `no-reply@example.com` / `Warden` |
-| `PASSWORD_ITERATIONS` | `600000`（可省） |
+| `PASSWORD_ITERATIONS` | `600000`（可省；环境变量账号统一用它） |
+
+> 邮件通知（SMTP、主密码提示）已整体移除，不再需要 `SMTP_*` / `MAIL_*` / `HINT_ENCRYPTION_SECRET`。
+> 配了 `USEREMAILn` 后注册只对名单内邮箱开放；**首次仍要在客户端注册一次**（库密钥由客户端生成），之后密码校验以环境变量为准。
 
 > 环境变量改动后必须**重新部署**才生效（Makers 不会热加载）。
 

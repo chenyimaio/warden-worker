@@ -26,8 +26,12 @@ import {
   verifyAttachmentToken,
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
-import { sendPasswordHint, mailConfigured } from './mail.js';
-import { readHintValue, buildHintFields, hintEncryptionEnabled, encryptHint } from './hint.js';
+import {
+  findEnvAccount,
+  envAccountKdf,
+  hasEnvAccounts,
+  verifyEnvAccount,
+} from './env-accounts.js';
 import { readUpload } from './upload.js';
 
 const app = new Hono();
@@ -112,6 +116,12 @@ function readHint(p) {
   return null;
 }
 const hasHintField = (p) => HINT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(p ?? {}, k));
+
+/** 提示字段：明文存库（邮件通知已移除，不再有密文形态） */
+const hintFieldsFrom = (plaintext) => {
+  const text = plaintext == null ? '' : String(plaintext).trim();
+  return { masterPasswordHint: text || null, masterPasswordHintEnc: null };
+};
 
 async function requireAuth(c) {
   const m = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
@@ -318,6 +328,19 @@ app.get('/api/web-status', (c) =>
 // ---------------------------------------------------------------- accounts
 const prelogin = async (c) => {
   const { email } = await body(c);
+  // 环境变量里的账号：KDF 参数由服务端固定给出，客户端据此推导 masterPasswordHash
+  const envAcc = email ? findEnvAccount(c.env, email) : null;
+  if (envAcc) {
+    const { kdf, kdfIterations } = envAccountKdf(c.env);
+    return c.json({
+      kdf,
+      kdfIterations,
+      kdfMemory: null,
+      kdfParallelism: null,
+      kdfSettings: { kdfType: kdf, iterations: kdfIterations, memory: null, parallelism: null },
+      salt: null,
+    });
+  }
   const user = email ? await findUserByEmail(c, email) : null;
   const kdf = user?.kdfType ?? 0;
   const iterations = user?.kdfIterations ?? 600000;
@@ -342,7 +365,12 @@ async function register(c) {
   const rl = await limit(c, 'register', requestIp(c), 10, 60);
   if (rl) return rl;
   if (!email) return c.json({ error: 'invalid email' }, 400);
-  if (!allowedEmail(c, email)) return c.json({ error: 'Not allowed to signup' }, 401);
+  // 配了 USEREMAILn 就只允许名单内的邮箱注册；没配则退回 ALLOWED_EMAILS
+  if (hasEnvAccounts(c.env)) {
+    if (!findEnvAccount(c.env, email)) return c.json({ error: 'Not allowed to signup' }, 401);
+  } else if (!allowedEmail(c, email)) {
+    return c.json({ error: 'Not allowed to signup' }, 401);
+  }
 
   const store = getStore(c.env);
   if (await findUserByEmail(c, email)) return c.json({ error: 'email already exists' }, 400);
@@ -369,7 +397,7 @@ async function register(c) {
     masterPasswordHash: hashPassword(masterPasswordHash, salt, iterations),
     passwordSalt: salt,
     passwordIterations: iterations,
-    ...(await buildHintFields(c.env, readHint(p))),
+    ...hintFieldsFrom(readHint(p)),
     key: userSymmetricKey,
     privateKey: String(asym.encryptedPrivateKey ?? ''),
     publicKey: String(asym.publicKey ?? ''),
@@ -395,43 +423,14 @@ app.post('/identity/accounts/register', register);
 app.post('/identity/accounts/register/finish', register);
 app.post('/identity/accounts/register/send-verification-email', (c) => c.json('fixed-token-to-mock'));
 
+// 主密码提示：邮件通知已移除（主密码由环境变量管理，提示没有意义）。
+// 保留路由与限流，避免客户端拿到 404 后反复重试。
 app.post('/api/accounts/password-hint', async (c) => {
   const { email } = await body(c);
-// anti email-bombing: per-email first, then per-IP
   const rlEmail = email ? await limit(c, 'hint-email', String(email).toLowerCase(), 3, 60) : null;
   if (rlEmail) return rlEmail;
   const rlIp = await limit(c, 'hint-ip', requestIp(c), 10, 60);
   if (rlIp) return rlIp;
-  //  200
-  try {
-    const user = email ? await findUserByEmail(c, email) : null;
-    if (user) {
-      const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
-      // HINT_EMAIL_MODE:
-      //   plain（默认） -> 解密后发明文，收到就能用
-      //   sealed        -> 直接发库里的密文记录，邮件通道里没有明文；
-      //                    收件人需要 HINT_ENCRYPTION_SECRET +
-      //                    scripts/decrypt-hint.mjs 才能解开
-      // 邮件形式由 HINT_ENCRYPTION_SECRET 决定：
-      //   配了密钥 -> 邮件里发密文（收件人用 scripts/decrypt-hint.mjs 解）
-      //   没配     -> 邮件里发明文
-      // 存储侧始终保留明文（见 hint.js buildHintFields），加密只发生在发信这一刻。
-      const secretEnabled = hintEncryptionEnabled(c.env);
-
-      const plain = ((await readHintValue(c.env, user)) ?? '').trim();
-      if (!plain) {
-        console.warn('[hint] no hint stored for', user.id);
-      } else if (secretEnabled) {
-        // 现场加密：保证邮件里的密文一定匹配当前 HINT_ENCRYPTION_SECRET
-        const rec = await encryptHint(c.env, plain);
-        await sendPasswordHint(c.env, { to: user.email, sealed: JSON.stringify(rec), baseUrl: base });
-      } else {
-        await sendPasswordHint(c.env, { to: user.email, hint: plain, baseUrl: base });
-      }
-    }
-  } catch (e) {
-    console.error('[hint] send failed', e?.message || e);
-  }
   return c.json({});
 });
 
@@ -467,7 +466,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
       ) {
         return c.json({ error: 'Username or access code is incorrect. Try again' }, 400);
       }
-    } else if (!mph || !verifyPassword(user.masterPasswordHash, user.passwordSalt, user.passwordIterations, mph)) {
+    } else if (!mph || !(await checkMasterPassword(c, user, mph))) {
       return c.json({ error: 'invalid_grant' }, 400);
     }
 
@@ -704,7 +703,7 @@ async function updateProfile(c) {
   const store = getStore(c.env);
   const uid = a.claims.sub;
   // 允许单独改主密码提示（传空串/null 表示清除）；不传则保持原值
-  const hintFields = hasHintField(p) ? await buildHintFields(c.env, readHint(p)) : null;
+  const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
   const next = await mutate(store, keys.profile(uid), (cur) => {
     if (!cur) return undefined;
     return {
@@ -876,7 +875,7 @@ app.post('/api/ciphers/purge', async (c) => {
   const mph = String(p.masterPasswordHash ?? '');
   if (!mph) return c.json({ error: 'Missing master password hash' }, 400);
   const user = prof.value;
-  if (!verifyPassword(user.masterPasswordHash, user.passwordSalt, user.passwordIterations, mph)) {
+  if (!(await checkMasterPassword(c, user, mph))) {
     return c.json({ error: 'Invalid password' }, 401);
   }
   const [cipherIdx, folderIdx] = await Promise.all([
@@ -1073,11 +1072,26 @@ const putTwoFactor = async (store, uid, atype, data) =>
 
 const delTwoFactor = async (store, uid, atype) => store.del(keys.twofactor(uid, atype));
 
+/**
+ * 校验用户提交的 masterPasswordHash。
+ *  - 邮箱在环境变量账号里：用 USERPASSWORDn 的明文推导后比对（明文不出网、不落库）
+ *  - 否则：回退到库里的 masterPasswordHash（兼容老账号）
+ */
+async function checkMasterPassword(c, user, providedHash) {
+  const envAcc = user?.email ? findEnvAccount(c.env, user.email) : null;
+  if (envAcc) {
+    const { kdfIterations } = envAccountKdf(c.env);
+    return verifyEnvAccount(envAcc, providedHash, kdfIterations);
+  }
+  if (!user?.masterPasswordHash) return false;
+  return verifyPassword(user.masterPasswordHash, user.passwordSalt, user.passwordIterations, providedHash);
+}
+
 /**  Rust masterPasswordHashTP  */
-function checkPassword(user, p) {
+async function checkPassword(c, user, p) {
   const mph = String(p.masterPasswordHash ?? '');
   if (!mph) return { error: 'Missing master password hash', status: 400 };
-  if (!verifyPassword(user.masterPasswordHash, user.passwordSalt, user.passwordIterations, mph)) {
+  if (!(await checkMasterPassword(c, user, mph))) {
     return { error: 'Invalid password', status: 401 };
   }
   return { ok: true };
@@ -1120,7 +1134,7 @@ app.post('/api/two-factor/get-authenticator', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const store = getStore(c.env);
@@ -1136,7 +1150,7 @@ async function activateAuthenticator(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const key = String(p.key ?? '').toUpperCase().replace(/\s+/g, '');
@@ -1184,7 +1198,7 @@ app.delete('/api/two-factor/authenticator', async (c) => {
   if (Number(p.type ?? TFA_AUTHENTICATOR) !== TFA_AUTHENTICATOR) {
     return c.json({ error: 'Invalid two factor type' }, 400);
   }
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const store = getStore(c.env);
@@ -1203,7 +1217,7 @@ async function disableTwoFactor(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const atype = Number(p.type ?? TFA_AUTHENTICATOR);
@@ -1219,7 +1233,7 @@ app.post('/api/two-factor/get-recover', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
   return c.json({ code: a.user.totpRecover ?? null, object: 'twoFactorRecover' });
 });
@@ -1229,7 +1243,7 @@ app.post('/api/accounts/password', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const newMph = String(p.newMasterPasswordHash ?? '');
@@ -1239,7 +1253,7 @@ app.post('/api/accounts/password', async (c) => {
   const salt = randomB64();
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
   const stamp = newId();
-  const hintFields = hasHintField(p) ? await buildHintFields(c.env, readHint(p)) : null;
+  const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
@@ -1262,7 +1276,7 @@ app.post('/api/accounts/kdf', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const authData = p.authenticationData ?? {};
@@ -1309,7 +1323,7 @@ app.post('/api/accounts/security-stamp', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const store = getStore(c.env);
@@ -1435,8 +1449,8 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 
 async function uploadAttachmentBytes(c) {
   // 和文件 Send 一样：EdgeOne 单次请求体上限约 6MB，超了平台会直接 500。
-  // UPLOAD_MAX_BYTES 同时管附件和文件 Send（旧的 ATTACHMENT_MAX_BYTES 仍兼容读取）。
-  const platformMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', envGet(c, 'ATTACHMENT_MAX_BYTES', 6 * 1024 * 1024))) || 0;
+  // UPLOAD_MAX_BYTES 同时管附件和文件 Send。
+  const platformMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header('content-length') || 0);
   if (platformMax && declared > platformMax) {
     return c.json(
@@ -1979,7 +1993,7 @@ async function uploadSendFile(c) {
   // EdgeOne 对单次请求体有硬上限（实测 6MB 可以、7MB 直接被平台拦成 500
   // INTERNAL_CLOUD_FUNCTION_INVOCATION_FAILED）。提前用 Content-Length 拦掉，
   // 给客户端一个明确的 413，而不是让它看到 500。
-  const maxBytes = Number(envGet(c, 'UPLOAD_MAX_BYTES', envGet(c, 'SEND_UPLOAD_MAX_BYTES', 6 * 1024 * 1024))) || 0;
+  const maxBytes = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header('content-length') || 0);
   if (maxBytes && declared > maxBytes) {
     console.warn('[send-upload] rejected by content-length', declared);
@@ -2115,7 +2129,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
 
-  const check = checkPassword(a.user, { masterPasswordHash: p.oldMasterKeyAuthenticationHash });
+  const check = await checkPassword(c, a.user, { masterPasswordHash: p.oldMasterKeyAuthenticationHash });
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const unlock = p.accountUnlockData?.masterPasswordUnlockData ?? {};
@@ -2612,7 +2626,7 @@ async function deleteAccount(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = checkPassword(a.user, p);
+  const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
   const store = getStore(c.env);
@@ -2663,5 +2677,4 @@ exported.get('/index.html', (c) => c.redirect('/vault/', 302));
 exported.route('/vault', app);
 exported.route('/', app);
 
-export { mailConfigured };
 export default exported;

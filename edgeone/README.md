@@ -7,14 +7,14 @@
 > EdgeOne 的 Edge Functions 只支持 JS、CPU 200 ms、body 1 MB，没有 SQL、没有 Durable Object、没有 cron，
 > 而 warden-worker 的 `D1 + do + worker-build` 全部依赖这些特性。
 
-[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CUSEREMAIL1%2CUSERPASSWORD1%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)
 
 ## 一键部署（Makers）
 
 | 站点 | 链接 |
 |---|---|
-| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME) |
-| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME) |
+| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CUSEREMAIL1%2CUSERPASSWORD1%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE) |
+| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CUSEREMAIL1%2CUSERPASSWORD1%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE) |
 
 两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、13 个环境变量名；输出目录留空。
 
@@ -155,23 +155,23 @@ curl -s -X POST localhost:8787/api/accounts/password-hint \
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `BASE_URL` | ✅ | 对外地址（邮件链接、附件/文件 Send 的 url 都基于它） |
-| `ALLOWED_EMAILS` | ✅ | 注册白名单，glob 逗号分隔；留空 = 关闭注册 |
+| `BASE_URL` | ✅ | 对外地址（附件/文件 Send 的 url 都基于它） |
+| `USEREMAIL1` / `USERPASSWORD1` | ✅ | 账号：邮箱 + **明文主密码**（服务端用它推导 `masterPasswordHash` 校验登录，明文不出网、不落库） |
+| `USEREMAIL2` / `USERPASSWORD2` … | ⬜ | 新账号 = 再加一组，序号递增 |
+| `ALLOWED_EMAILS` | ⬜ | 未配 `USEREMAILn` 时的回退：注册白名单（glob，逗号分隔）；留空 = 关闭注册 |
 | `JWT_SECRET` / `JWT_REFRESH_SECRET` | ✅ | 两个独立随机串，泄露即可伪造令牌 |
-| `PASSWORD_ITERATIONS` | ⬜ | 服务端 PBKDF2 迭代数，默认 600000 |
+| `PASSWORD_ITERATIONS` | ⬜ | PBKDF2 迭代数（环境变量账号统一用它），默认 600000 |
 | `STORE_DRIVER` | ✅ | `blob`（Makers）/ `memory`（本地） |
 | `BLOB_STORE` | ⬜ | Blob 命名空间，默认 `warden` |
 | `BLOB_PROJECT_ID` / `BLOB_TOKEN` | ⬜ | 仅外部脚本/CI 用；Functions 内自动鉴权 |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | ✅ | 发信；SES 用 `smtp.qcloudmail.com:465` |
-| `SMTP_USER` / `SMTP_PASS` | ✅ | SMTP 凭据 |
-| `MAIL_FROM` / `MAIL_FROM_NAME` | ✅ | 发信人，必须是已验证的发信域名 |
-| `MAIL_DRY_RUN` | ⬜ | `true` 时只打日志不发信，本地联调用 |
-| `MAIL_ENABLED` | ⬜ | `false` 关闭全部发信（缺省开启） |
-| `WEB_VAULT_ENABLED` | ⬜ | 默认 `true`：根路径跳 `/vault/`（官方网页版）；`false` 只显示落地页。**关闭后 Send 分享链接仍会转到 `/vault/` 渲染** |
-| `HINT_ENCRYPTION_SECRET` | ⬜ | 默认 `*` = 主密码提示明文存储；设为任意随机串则用 **Argon2id 派生密钥 + AES-256-GCM** 加密存储。**启用后不可更换/丢失** |
-| `PORT` | ⬜ | 仅 `src/dev.js` 本地调试用，默认 8787 |
-| `ATTACHMENT_MAX_BYTES` | ⬜ | 单附件上限，超了返 413 |
+| `WEB_VAULT_ENABLED` | ⬜ | 默认 `true`：构建时下载官方网页版，根路径 302 到 `/vault/`；`false` 不下载（根路径会 404） |
+| `WEB_VAULT_VERSION` / `WEB_VAULT_BASE_URL` | ⬜ | 构建期：固定版本 / 换下载源 |
+| `UPLOAD_MAX_BYTES` | ⬜ | 单次上传上限（附件 + 文件 Send），默认 6 MiB（平台硬上限） |
 | `ALLOW_TOTP_DRIFT` | ⬜ | 默认 `true`，允许 TOTP ±1 步 |
+| `PORT` | ⬜ | 仅 `src/dev.js` 本地调试用，默认 8787 |
+
+> 邮件通知（SMTP、主密码提示）已整体移除：不再有 `SMTP_*` / `MAIL_*` / `HINT_ENCRYPTION_SECRET`，`/api/accounts/password-hint` 仍返回 200 但什么都不发。
+> 配了 `USEREMAILn` 之后，注册接口只对名单内的邮箱开放；**首次仍需在客户端注册一次**（库密钥由客户端生成，服务端无法代造），之后密码校验全部以环境变量为准。
 
 ### 步骤
 

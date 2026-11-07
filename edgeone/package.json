@@ -9,27 +9,19 @@
   "scripts": {
     "dev": "node src/dev.js",
     "build": "node scripts/build-makes.mjs",
-    "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/mail.js",
+    "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/upload.js && node --check src/env-accounts.js && node --check src/makers.js",
     "smoke": "node scripts/smoke.mjs",
     "accept": "node scripts/acceptance.mjs",
     "parity": "node scripts/route-parity.mjs --strict",
     "test:blob": "node scripts/blob-adapter-test.mjs",
     "test:repair": "node scripts/test-profile-repair.mjs",
-    "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs",
     "doc": "node scripts/doc-check.mjs",
-    "test:smtp": "node scripts/test-smtp.mjs",
-    "test:hint": "node scripts/test-hint-crypto.mjs && node scripts/test-hint-e2e.mjs && node scripts/test-hint-mail.mjs && node scripts/test-hint-route.mjs && node scripts/test-hint-rotate.mjs",
-    "hint:decrypt": "node scripts/decrypt-hint.mjs",
-    "hint:migrate": "node scripts/migrate-hints.mjs",
-    "hint:rotate": "node scripts/rotate-hints.mjs",
     "blob:selftest": "node scripts/blob-selftest.mjs"
   },
   "dependencies": {
     "@edgeone/pages-blob": "^0.0.19",
-    "hash-wasm": "^4.13.0",
     "hono": "^4.6.0",
-    "jose": "^5.9.0",
-    "nodemailer": "^6.9.0"
+    "jose": "^5.9.0"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.0",
