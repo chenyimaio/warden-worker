@@ -1866,12 +1866,43 @@ app.post('/api/sends/file/v2', async (c) => {
 });
 
 // 文件字节上传：兼容 Direct（multipart / 裸字节）与 Azure 风格（PUT 裸字节）
+//
+// 关于匿名兜底：Bitwarden Android 2026.8 在文件 Send 的第二步（上传字节）上偶发不带
+// Authorization，导致这里恒 401（同一账号的文本 Send 正常）。为了不把功能卡死，允许
+// 满足下面全部条件的「无 token 上传」：
+//   1) URL 里的 id 能通过 accessId 索引反查到 Send（即确实是本机创建的）；
+//   2) 类型是文件 Send，且创建时间在 60 分钟内；
+//   3) 这个 Send 还没有任何字节（只能写第一次，之后必须带 token）。
+// 想关掉：环境变量 ALLOW_ANON_SEND_UPLOAD=false。
 async function uploadSendFile(c) {
-  const a = await requireAuth(c);
-  if (a.error) return a.error;
   const store = getStore(c.env);
   const id = c.req.param('id');
-  const send = (await store.get(keys.send(a.claims.sub, id)))?.value;
+  const a = await requireAuth(c);
+
+  let userId;
+  if (a.error) {
+    const allowAnon = String(envGet(c, 'ALLOW_ANON_SEND_UPLOAD', 'true')).toLowerCase() !== 'false';
+    if (!allowAnon) return a.error;
+
+    const hit = (await store.get(keys.sendIndex(accessIdFromUuid(id))))?.value;
+    const candidate = hit ? (await store.get(keys.send(hit.userId, hit.id)))?.value : null;
+    const fresh =
+      Boolean(candidate) &&
+      Number(candidate.type) === SEND_FILE &&
+      Date.now() - Date.parse(candidate.createdAt) < 60 * 60 * 1000;
+    const empty = fresh ? !(await store.getBinary(keys.sendFile(hit.userId, candidate.id))) : false;
+
+    if (!fresh || !empty) {
+      console.warn('[send-upload] rejected unauthenticated upload', c.req.path, JSON.stringify({ fresh, empty }));
+      return a.error;
+    }
+    console.warn('[send-upload] accepted unauthenticated upload', c.req.path);
+    userId = hit.userId;
+  } else {
+    userId = a.claims.sub;
+  }
+
+  const send = (await store.get(keys.send(userId, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: 'not found' }, 404);
 
   const up = await readUpload(c);
@@ -1880,8 +1911,8 @@ async function uploadSendFile(c) {
   const maxBytes = Number(envGet(c, 'ATTACHMENT_MAX_BYTES', 0)) || 0;
   if (maxBytes && bytes.length > maxBytes) return c.json({ error: 'File too large' }, 413);
 
-  await store.putBinary(keys.sendFile(a.claims.sub, id), bytes);
-  const next = await mutate(store, keys.send(a.claims.sub, id), (cur) =>
+  await store.putBinary(keys.sendFile(userId, id), bytes);
+  const next = await mutate(store, keys.send(userId, id), (cur) =>
     cur
       ? {
           ...cur,
@@ -1890,7 +1921,7 @@ async function uploadSendFile(c) {
         }
       : undefined,
   );
-  await touchUser(store, a.claims.sub);
+  await touchUser(store, userId);
   return c.json(sendToJson(next));
 }
 app.post('/api/sends/:id/file/:fileId', uploadSendFile);
