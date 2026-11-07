@@ -16879,6 +16879,20 @@ app.post("/api/sends/access", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   return c.json(sendAccessJson(send));
 });
+app.post("/api/sends/access/file/:fileId", async (c) => {
+  const store = getStore2(c.env);
+  const send = await lookupSendByAccessId(store, c.req.param("fileId"));
+  if (!send) return c.json({ error: "Send is not accessible" }, 404);
+  const v = validateSendAccess(send);
+  if (v.error) return c.json({ error: v.error }, v.status);
+  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
+  if (!bytes) return c.json({ error: "file not found" }, 404);
+  return c.body(bytes, 200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(bytes.length),
+    "cache-control": "no-store"
+  });
+});
 app.post("/api/sends/file/v2", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
@@ -16914,18 +16928,24 @@ app.post("/api/sends/file/v2", async (c) => {
   await touchUser(store, a.claims.sub);
   return c.json({
     sendResponse: sendToJson(send),
-    fileUploadType: 0,
+    // 1 = Direct：客户端会把加密后的字节 POST 到下面的 url（multipart 或裸字节）。
+    // 之前写 0（Azure）会让客户端按 Blob SAS 协议 PUT，我们没有 Azure 后端，上传必然失败。
+    fileUploadType: 1,
     url: `${baseUrlOf(c)}/api/sends/${id}/file/${id}`
   });
 });
-app.post("/api/sends/:id/file/:fileId", async (c) => {
+async function uploadSendFile(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const store = getStore2(c.env);
   const id = c.req.param("id");
   const send = (await store.get(keys.send(a.claims.sub, id)))?.value;
   if (!send || Number(send.type) !== SEND_FILE) return c.json({ error: "not found" }, 404);
-  const bytes = Buffer.from(await c.req.arrayBuffer());
+  const up = await readUpload(c);
+  if (up.error) return c.json({ error: up.error }, 400);
+  const bytes = up.bytes;
+  const maxBytes = Number(envGet(c, "ATTACHMENT_MAX_BYTES", 0)) || 0;
+  if (maxBytes && bytes.length > maxBytes) return c.json({ error: "File too large" }, 413);
   await store.putBinary(keys.sendFile(a.claims.sub, id), bytes);
   const next = await mutate(
     store,
@@ -16936,8 +16956,11 @@ app.post("/api/sends/:id/file/:fileId", async (c) => {
       updatedAt: nowIso()
     } : void 0
   );
+  await touchUser(store, a.claims.sub);
   return c.json(sendToJson(next));
-});
+}
+app.post("/api/sends/:id/file/:fileId", uploadSendFile);
+app.put("/api/sends/:id/file/:fileId", uploadSendFile);
 app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   const p = await body(c);
   const auth = (c.req.header("authorization") || "").match(/^Bearer\s+(.+)$/i);
@@ -17316,20 +17339,6 @@ app.post("/api/sends/file", async (c) => {
   await store.putBinary(keys.sendFile(a.claims.sub, id), up.bytes);
   await touchUser(store, a.claims.sub);
   return c.json(sendToJson(send));
-});
-app.post("/api/sends/access/file/:fileId", async (c) => {
-  const store = getStore2(c.env);
-  const send = await lookupSendByAccessId(store, c.req.param("fileId"));
-  if (!send) return c.json({ error: "Send is not accessible" }, 404);
-  const v = validateSendAccess(send);
-  if (v.error) return c.json({ error: v.error }, v.status);
-  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: "file not found" }, 404);
-  return c.body(bytes, 200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(bytes.length),
-    "cache-control": "no-store"
-  });
 });
 app.get("/api/devices/identifier/:id", async (c) => {
   const a = await requireAuth(c);
