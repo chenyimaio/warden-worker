@@ -5,3 +5,7 @@ node_modules/
 .DS_Store
 src/*.damaged
 src/*.repaired.js
+
+# 构建时下载的官方 Web Vault（~80MB，不入库）
+public/vault/
+tmpvault/

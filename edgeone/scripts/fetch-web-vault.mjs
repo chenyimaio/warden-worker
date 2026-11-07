@@ -7,10 +7,13 @@
 // 环境变量：
 //   WEB_VAULT_ENABLED  = "false" 时跳过（不下载，站点只有落地页）
 //   WEB_VAULT_VERSION  指定版本，默认 v2026.10.1
+//   WEB_VAULT_BASE_URL 下载源前缀（默认 GitHub Release；国内构建慢/不通时可换镜像）
 //   OUT_DIR            输出目录，默认 <repo>/edgeone/public/vault（测试时可覆盖）
+//   VAULT_MAX_FILE_MB  单个文件上限（默认 20），超过的文件会被删掉
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
-import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, renameSync, readdirSync } from 'node:fs';
+// 落地页会探测 /vault/index.html，构建失败时不会把用户重定向到空目录。
+import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
@@ -22,9 +25,11 @@ import { tmpdir } from 'node:os';
 const here = dirname(fileURLToPath(import.meta.url));
 const VERSION = process.env.WEB_VAULT_VERSION || 'v2026.10.1';
 const OUT_DIR = process.env.OUT_DIR || resolve(here, '../public/vault');
+const MAX_FILE_MB = Number(process.env.VAULT_MAX_FILE_MB || 20);
 const enabled = String(process.env.WEB_VAULT_ENABLED ?? 'true').toLowerCase() !== 'false';
 
 const log = (...a) => console.log('[web-vault]', ...a);
+const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 if (!enabled) {
   log('WEB_VAULT_ENABLED=false，跳过下载');
@@ -42,9 +47,38 @@ async function download(url, dest) {
   await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
 }
 
+/** 递归列出文件（返回 {path, size}）。 */
+function walk(dir, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (entry.isFile()) out.push({ path: full, size: statSync(full).size });
+  }
+  return out;
+}
+
+/** 删掉 source map 和超大文件：EdgeOne 单文件上限 25MiB，且总包越小越好。 */
+function prune(dir) {
+  const maxBytes = MAX_FILE_MB * 1024 * 1024;
+  let removed = 0;
+  let freed = 0;
+  for (const f of walk(dir)) {
+    const isMap = f.path.endsWith('.map');
+    const tooBig = f.size > maxBytes;
+    if (isMap || tooBig) {
+      unlinkSync(f.path);
+      removed += 1;
+      freed += f.size;
+      if (tooBig && !isMap) log(`  删除超大文件 ${f.path.replace(dir, '')} (${mb(f.size)})`);
+    }
+  }
+  if (removed) log(`  已删除 ${removed} 个文件（source map / 超过 ${MAX_FILE_MB}MB），释放 ${mb(freed)}`);
+}
+
 async function main() {
   const tmp = join(tmpdir(), `bw-web-${VERSION}-${Date.now()}`);
-  mkdirSync(tmp, { recursive: true });
+  const extractDir = join(tmp, 'extract');
+  mkdirSync(extractDir, { recursive: true });
   const tgz = join(tmp, tarball);
 
   log(`下载 ${VERSION} ...`);
@@ -67,12 +101,21 @@ async function main() {
   }
 
   log('解压 ...');
-  execFileSync('tar', ['-xzf', tgz, '-C', tmp], { stdio: 'inherit' });
+  // 解压到独立子目录，避免把下载的 tar.gz 一起搬进产物（上次 39MB 的包就是这么进去的）。
+  // 用相对路径 + cwd，避免 Windows 上 bsdtar 把 "C:\..." 当成 host:path。
+  execFileSync('tar', ['-xzf', tarball, '-C', 'extract'], { cwd: tmp, stdio: 'inherit' });
 
-  // 包内通常是一个 package/ 目录
-  const inner = existsSync(join(tmp, 'package')) ? join(tmp, 'package') : tmp;
-  const files = readdirSync(inner);
-  log(`包内文件数: ${files.length}`);
+  // 包内通常是一个顶层目录（web-vault/ 或 package/），取它作为站点根，
+  // 这样 public/vault/index.html 才是网页版入口，而不是 public/vault/web-vault/index.html。
+  const top = readdirSync(extractDir, { withFileTypes: true });
+  const inner =
+    top.length === 1 && top[0].isDirectory() ? join(extractDir, top[0].name) : extractDir;
+  log(`站点根: ${inner.replace(extractDir, '<archive>')}`);
+
+  const before = walk(inner).reduce((n, f) => n + f.size, 0);
+  prune(inner);
+  const after = walk(inner).reduce((n, f) => n + f.size, 0);
+  log(`体积 ${mb(before)} -> ${mb(after)}`);
 
   if (existsSync(OUT_DIR)) rmSync(OUT_DIR, { recursive: true, force: true });
   mkdirSync(dirname(OUT_DIR), { recursive: true });
@@ -83,7 +126,11 @@ async function main() {
     execFileSync('cp', ['-r', `${inner}/.`, OUT_DIR], { stdio: 'inherit' });
   }
   rmSync(tmp, { recursive: true, force: true });
-  log(`完成 -> ${OUT_DIR}`);
+
+  if (!existsSync(join(OUT_DIR, 'index.html'))) {
+    throw new Error('产物里没有 index.html，站点根选错了');
+  }
+  log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);
 }
 
 main().catch((e) => {

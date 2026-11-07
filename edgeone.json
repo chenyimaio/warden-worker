@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "warden-edgeone",
   "installCommand": "cd edgeone && npm ci --include=dev",
-  "buildCommand": "cd edgeone && npm run build && cd .. && node edgeone/scripts/fetch-web-vault.mjs",
+  "buildCommand": "cd edgeone && npm run build && cd .. && node edgeone/scripts/fetch-web-vault.mjs && node edgeone/scripts/sync-handler.mjs",
   "outputDirectory": "edgeone/public",
   "nodeVersion": "20.18.0",
   "cloudFunctions": {
