@@ -9,12 +9,13 @@ This project provides a self-hosted, Bitwarden-compatible server that can be dep
 >
 > 文档：[edgeone/README.md](edgeone/README.md) · 部署手册：[edgeone/docs/DEPLOY.md](edgeone/docs/DEPLOY.md)
 >
-> [![Deploy with EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+> [![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
 >
-> 图片没显示时，直接打开：[一键部署链接](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)
+> 图片没显示时：
+> [国内站一键部署](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)（`console.cloud.tencent.com`）·
+> [国际站一键部署](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE%2CSMTP_HOST%2CSMTP_PORT%2CSMTP_SECURE%2CSMTP_USER%2CSMTP_PASS%2CMAIL_FROM%2CMAIL_FROM_NAME)（`edgeone.ai`）
 >
-> **国际站**：点上面的按钮即一键部署（`edgeone.ai/pages/new`）。
-> **国内站**：控制台入口 [Makers 控制台](https://console.cloud.tencent.com/edgeone/makers) → 新建项目 → 导入本仓库 → 分支 `edgeone`、根目录 `edgeone`、安装命令 `npm ci`、构建命令 `npm run build`、输出目录留空。
+> 两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、13 个环境变量名。输出目录留空。
 
 ## Why another Bitwarden server?
 
