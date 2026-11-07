@@ -1806,7 +1806,26 @@ app.post('/api/sends/access', async (c) => {
 // /api/sends/:id/file/:fileId, otherwise "access" is taken as a sendId.
 app.post('/api/sends/access/file/:fileId', async (c) => {
   const store = getStore(c.env);
-  const send = await lookupSendByAccessId(store, c.req.param('fileId'));
+  const p = await body(c);
+  const auth = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
+  const token = p.token ?? (auth ? auth[1] : '');
+
+  // 网页版会带 send-access token 请求 /sends/access/file/{file.id}。
+  // 新数据里 file.id 就是 Send 的 id，能直接反查；老数据写死成 'file'，所以
+  // 优先用 token 里的 sid 定位，再退回按 fileId 反查。
+  let send = null;
+  if (token) {
+    try {
+      const payload = await verifyAccess(c.env, token);
+      if (payload?.sid != null) {
+        const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
+        if (idx) send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
+      }
+    } catch (e) {
+      console.warn('[send-access] file token rejected', e?.code || e?.message || e);
+    }
+  }
+  if (!send) send = await lookupSendByAccessId(store, c.req.param('fileId'));
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
@@ -1838,7 +1857,9 @@ app.post('/api/sends/file/v2', async (c) => {
     type: SEND_FILE,
     name: String(p.name ?? ''),
     notes: p.notes ?? null,
-    data: { id: 'file', fileName, size: String(size), sizeName: displaySize(size) },
+    // 文件 id 直接用 Send 的 id：网页版拼 /sends/access/file/{file.id} 时，
+    // 服务端才能通过 accessId 索引反查到这条 Send（之前写死 'file' 会 404）。
+    data: { id, fileName, size: String(size), sizeName: displaySize(size) },
     akey: String(p.key ?? ''),
     maxAccessCount: p.maxAccessCount != null ? Number(p.maxAccessCount) : null,
     accessCount: 0,
@@ -2343,7 +2364,7 @@ app.post('/api/sends/file', async (c) => {
     type: SEND_FILE,
     name: String(f.name ?? ''),
     notes: f.notes ?? null,
-    data: { id: 'file', fileName: String(f.fileName ?? 'file'), size: String(up.bytes.length), sizeName: displaySize(up.bytes.length) },
+    data: { id, fileName: String(f.fileName ?? 'file'), size: String(up.bytes.length), sizeName: displaySize(up.bytes.length) },
     akey: String(f.key ?? ''),
     maxAccessCount: f.maxAccessCount != null && f.maxAccessCount !== '' ? Number(f.maxAccessCount) : null,
     accessCount: 0,
