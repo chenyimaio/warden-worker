@@ -215,6 +215,9 @@ function profileToJson(u, twoFactorEnabled = false) {
     emailVerified: true,
     twoFactorEnabled: Boolean(twoFactorEnabled),
     premium: true,
+    // 客户端用 maxStorageGb 判断「还能不能传附件」：缺这个字段时安卓端可能直接
+    // 隐藏附件入口（或显示存储已满）。Blob 免费版 1 GB，这里就按 1 GB 报。
+    maxStorageGb: 1,
     usesKeyConnector: false,
     creationDate: u.createdAt,
     privateKey: u.privateKey,
