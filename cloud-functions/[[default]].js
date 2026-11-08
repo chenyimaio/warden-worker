@@ -14755,6 +14755,13 @@ var MemoryStore = class {
     const v = this.#m.get(key);
     return v ? Buffer.from(v.value) : null;
   }
+  async getStream(key) {
+    const v = this.#m.get(key);
+    if (!v) return null;
+    const buf = Buffer.from(v.value);
+    const { Readable } = await import("node:stream");
+    return Readable.toWeb(Readable.from(buf));
+  }
 };
 var BlobStore = class {
   supportsConditional = false;
@@ -14771,7 +14778,10 @@ var BlobStore = class {
   }
   async head(key) {
     const meta = await this.#store.getMetadata(key, { consistency: "strong" });
-    return meta ? { etag: meta.etag ?? null, size: 0 } : null;
+    if (!meta) return null;
+    const h = meta.headers ?? {};
+    const raw2 = h["content-length"] ?? h["Content-Length"];
+    return { etag: meta.etag ?? null, size: Number(raw2) || 0 };
   }
   async put(key, value) {
     await this.#store.setJSON(key, value);
@@ -14810,6 +14820,10 @@ var BlobStore = class {
   }
   async putBinary(key, bytes) {
     await this.#store.set(key, bytes);
+  }
+  /** 流式读取（大文件下载用，避免把整个对象缓冲进内存） */
+  async getStream(key) {
+    return this.#store.get(key, { type: "stream", consistency: "strong" });
   }
 };
 var instances = /* @__PURE__ */ new Map();
@@ -16239,6 +16253,33 @@ async function presignedUploadUrl(c, key) {
   }
 }
 var baseUrlOf = (c) => String(envGet(c, "BASE_URL", new URL(c.req.url).origin)).replace(/\/+$/, "");
+async function streamBinary(c, store, key, contentType = "application/octet-stream", extraHeaders = {}) {
+  let size = 0;
+  try {
+    size = (await store.head(key))?.size ?? 0;
+  } catch {
+  }
+  try {
+    const stream = await store.getStream(key);
+    if (stream) {
+      const headers = { ...extraHeaders, "content-type": contentType, "cache-control": "no-store" };
+      if (size) headers["content-length"] = String(size);
+      console.log("[download] stream", { key, size });
+      return c.body(stream, 200, headers);
+    }
+  } catch (e) {
+    console.warn("[download] stream failed, falling back to buffer:", e?.message || e);
+  }
+  const bytes = await store.getBinary(key);
+  if (!bytes) return null;
+  console.log("[download] buffer", { key, size: bytes.length });
+  return c.body(bytes, 200, {
+    ...extraHeaders,
+    "content-type": contentType,
+    "content-length": String(bytes.length),
+    "cache-control": "no-store"
+  });
+}
 app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
@@ -16369,14 +16410,10 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
   const store = getStore2(c.env);
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param("id")) return c.json({ error: "not found" }, 404);
-  const bytes = await store.getBinary(keys.attachmentData(uid, meta.id));
-  if (!bytes) return c.json({ error: "not found" }, 404);
-  return c.body(bytes, 200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(bytes.length),
-    "content-disposition": `attachment; filename="${encodeURIComponent(meta.fileName)}"`,
-    "cache-control": "no-store"
+  const res = await streamBinary(c, store, keys.attachmentData(uid, meta.id), "application/octet-stream", {
+    "content-disposition": `attachment; filename="${encodeURIComponent(meta.fileName)}"`
   });
+  return res ?? c.json({ error: "not found" }, 404);
 });
 async function deleteAttachment(c) {
   const a = await requireAuth(c);
@@ -16730,14 +16767,8 @@ app.get("/api/sends/access/file/:fileId/data", async (c) => {
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
-  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: "file not found" }, 404);
-  console.log("[send-file] download", { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
-  return c.body(bytes, 200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(bytes.length),
-    "cache-control": "no-store"
-  });
+  const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
+  return res ?? c.json({ error: "file not found" }, 404);
 });
 app.post("/api/sends/file/v2", async (c) => {
   const a = await requireAuth(c);
@@ -16930,14 +16961,8 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   if (sendHasPassword(send) && !checkSendPassword(send, p.password ?? null)) {
     return c.json({ error: "Invalid password" }, 401);
   }
-  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: "file not found" }, 404);
-  console.log("[send-file] download", { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
-  return c.body(bytes, 200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(bytes.length),
-    "cache-control": "no-store"
-  });
+  const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
+  return res ?? c.json({ error: "file not found" }, 404);
 });
 app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
   const a = await requireAuth(c);

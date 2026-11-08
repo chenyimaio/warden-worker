@@ -1421,6 +1421,40 @@ async function presignedUploadUrl(c, key) {
 
 const baseUrlOf = (c) => String(envGet(c, 'BASE_URL', new URL(c.req.url).origin)).replace(/\/+$/, '');
 
+/**
+ * 二进制下载：优先**流式**返回，避免把整个对象缓冲进内存
+ * （9 MB 文件缓冲时内存峰值到过 95 MB，而且大响应体容易被平台截断）。
+ * 流式不可用时退回一次性缓冲，行为与以前一致。
+ */
+async function streamBinary(c, store, key, contentType = 'application/octet-stream', extraHeaders = {}) {
+  let size = 0;
+  try {
+    size = (await store.head(key))?.size ?? 0;
+  } catch {
+    /* 拿不到大小就按 chunked 返回 */
+  }
+  try {
+    const stream = await store.getStream(key);
+    if (stream) {
+      const headers = { ...extraHeaders, 'content-type': contentType, 'cache-control': 'no-store' };
+      if (size) headers['content-length'] = String(size);
+      console.log('[download] stream', { key, size });
+      return c.body(stream, 200, headers);
+    }
+  } catch (e) {
+    console.warn('[download] stream failed, falling back to buffer:', e?.message || e);
+  }
+  const bytes = await store.getBinary(key);
+  if (!bytes) return null;
+  console.log('[download] buffer', { key, size: bytes.length });
+  return c.body(bytes, 200, {
+    ...extraHeaders,
+    'content-type': contentType,
+    'content-length': String(bytes.length),
+    'cache-control': 'no-store',
+  });
+}
+
 app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
@@ -1583,14 +1617,10 @@ let uid;
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param('id')) return c.json({ error: 'not found' }, 404);
 
-  const bytes = await store.getBinary(keys.attachmentData(uid, meta.id));
-  if (!bytes) return c.json({ error: 'not found' }, 404);
-  return c.body(bytes, 200, {
-    'content-type': 'application/octet-stream',
-    'content-length': String(bytes.length),
+  const res = await streamBinary(c, store, keys.attachmentData(uid, meta.id), 'application/octet-stream', {
     'content-disposition': `attachment; filename="${encodeURIComponent(meta.fileName)}"`,
-    'cache-control': 'no-store',
   });
+  return res ?? c.json({ error: 'not found' }, 404);
 });
 
 async function deleteAttachment(c) {
@@ -1997,14 +2027,8 @@ app.get('/api/sends/access/file/:fileId/data', async (c) => {
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
-  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: 'file not found' }, 404);
-  console.log('[send-file] download', { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
-  return c.body(bytes, 200, {
-    'content-type': 'application/octet-stream',
-    'content-length': String(bytes.length),
-    'cache-control': 'no-store',
-  });
+  const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
+  return res ?? c.json({ error: 'file not found' }, 404);
 });
 
 app.post('/api/sends/file/v2', async (c) => {
@@ -2246,14 +2270,8 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
     return c.json({ error: 'Invalid password' }, 401);
   }
 
-  const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: 'file not found' }, 404);
-  console.log('[send-file] download', { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
-  return c.body(bytes, 200, {
-    'content-type': 'application/octet-stream',
-    'content-length': String(bytes.length),
-    'cache-control': 'no-store',
-  });
+  const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
+  return res ?? c.json({ error: 'file not found' }, 404);
 });
 
 // ---------------------------------------------------------------- key rotation / import

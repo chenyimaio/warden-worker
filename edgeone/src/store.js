@@ -101,6 +101,14 @@ export class MemoryStore {
     const v = this.#m.get(key);
     return v ? Buffer.from(v.value) : null;
   }
+
+  async getStream(key) {
+    const v = this.#m.get(key);
+    if (!v) return null;
+    const buf = Buffer.from(v.value);
+    const { Readable } = await import('node:stream');
+    return Readable.toWeb(Readable.from(buf));
+  }
 }
 
 /**
@@ -141,7 +149,11 @@ export class BlobStore {
 
   async head(key) {
     const meta = await this.#store.getMetadata(key, { consistency: 'strong' });
-    return meta ? { etag: meta.etag ?? null, size: 0 } : null;
+    if (!meta) return null;
+    // 元数据里的 headers 一般带 content-length，用它算真实大小（下载时要设 Content-Length）
+    const h = meta.headers ?? {};
+    const raw = h['content-length'] ?? h['Content-Length'];
+    return { etag: meta.etag ?? null, size: Number(raw) || 0 };
   }
 
   async put(key, value) {
@@ -187,6 +199,11 @@ export class BlobStore {
 
   async putBinary(key, bytes) {
     await this.#store.set(key, bytes);
+  }
+
+  /** 流式读取（大文件下载用，避免把整个对象缓冲进内存） */
+  async getStream(key) {
+    return this.#store.get(key, { type: 'stream', consistency: 'strong' });
   }
 }
 
