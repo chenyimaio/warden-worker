@@ -16236,6 +16236,13 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   if (!cipher) return c.json({ error: "not found" }, 404);
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
+  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
+    return c.json(
+      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      413
+    );
+  }
+  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
   const meta = {
     id,
     cipherId,
@@ -16243,17 +16250,11 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     fileName: String(p.fileName ?? "file"),
     fileSize: declaredSize,
     key: p.key ?? null,
+    // 探针：记下这次是否给了预签名地址，用来判断客户端会不会真的去用它
+    direct: Boolean(direct),
     createdAt: nowIso()
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413
-    );
-  }
-  const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
-  const direct = declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log("[attachment] create", { id, size: declaredSize, direct: Boolean(direct) });
   const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
   const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
@@ -16295,6 +16296,13 @@ async function uploadAttachmentBytes(c) {
   const { id: cipherId, aid } = c.req.param();
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: "not found" }, 404);
+  if (meta.direct) {
+    console.warn("[attachment] client ignored the presigned url and uploaded through the function", {
+      aid,
+      size: c.req.header("content-length") ?? null,
+      contentType: (c.req.header("content-type") ?? "").slice(0, 60) || null
+    });
+  }
   const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
   if (existing) return c.json({});
   const up = await readUpload(c);

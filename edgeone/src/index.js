@@ -1412,6 +1412,18 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
+
+  // 大附件走直传（小附件保持函数上传，行为不变）
+  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
+    return c.json(
+      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      413,
+    );
+  }
+  // 附件一律先尝试预签名直传：客户端如果用 url，字节就不经过函数；
+  // 如果它仍然 POST 给函数，小文件也能成功（≤ UPLOAD_MAX_BYTES），不会破坏功能。
+  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+
   const meta = {
     id,
     cipherId,
@@ -1419,20 +1431,11 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
     fileName: String(p.fileName ?? 'file'),
     fileSize: declaredSize,
     key: p.key ?? null,
+    // 探针：记下这次是否给了预签名地址，用来判断客户端会不会真的去用它
+    direct: Boolean(direct),
     createdAt: nowIso(),
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
-
-  // 大附件同样走直传（小附件保持函数上传，行为不变）
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413,
-    );
-  }
-  const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
-  const direct =
-    declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log('[attachment] create', { id, size: declaredSize, direct: Boolean(direct) });
 
   // 安卓客户端的 AttachmentJsonResponse.Success 强制要求 fileUploadType 和
@@ -1492,6 +1495,13 @@ async function uploadAttachmentBytes(c) {
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: 'not found' }, 404);
 
+  if (meta.direct) {
+    console.warn('[attachment] client ignored the presigned url and uploaded through the function', {
+      aid,
+      size: c.req.header('content-length') ?? null,
+      contentType: (c.req.header('content-type') ?? '').slice(0, 60) || null,
+    });
+  }
   // 字节已经在了（客户端先直传成功、又补发了一次确认请求）：直接当成功返回，
   // 免得重复上传把请求体撑爆。
   const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
