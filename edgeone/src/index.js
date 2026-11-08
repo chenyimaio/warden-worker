@@ -1492,6 +1492,11 @@ async function uploadAttachmentBytes(c) {
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: 'not found' }, 404);
 
+  // 字节已经在了（客户端先直传成功、又补发了一次确认请求）：直接当成功返回，
+  // 免得重复上传把请求体撑爆。
+  const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
+  if (existing) return c.json({});
+
   const up = await readUpload(c);
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;

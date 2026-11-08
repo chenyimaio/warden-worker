@@ -16295,6 +16295,8 @@ async function uploadAttachmentBytes(c) {
   const { id: cipherId, aid } = c.req.param();
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: "not found" }, 404);
+  const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
+  if (existing) return c.json({});
   const up = await readUpload(c);
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
