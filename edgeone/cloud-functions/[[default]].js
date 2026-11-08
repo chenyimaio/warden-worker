@@ -16633,10 +16633,13 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) {
+    const siblings = await store.list(`u/${send.userId}/sends/`).then((rows) => rows.map((r) => r.key)).catch(() => []);
     console.warn("[send-access] file bytes missing", {
       sendId: send.id,
+      expectKey: keys.sendFile(send.userId, send.id),
       declaredSize: send.data?.size ?? null,
-      createdAt: send.createdAt ?? null
+      createdAt: send.createdAt ?? null,
+      siblings
     });
     return c.json({ error: "file not found", reason: "upload_incomplete" }, 404);
   }

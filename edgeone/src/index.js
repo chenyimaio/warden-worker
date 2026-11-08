@@ -1893,10 +1893,17 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   if (!bytes) {
     // 典型场景：创建 Send 成功，但客户端上传那一步失败（平台 500 / 直传 URL 用错），
     // 于是记录在、字节不在。网页版会显示「找不到与此 Send 关联的文件」。
+    // 顺手把这个用户的 sends 前缀列出来，确认对象是「没写进去」还是「写到了别的 key」。
+    const siblings = await store
+      .list(`u/${send.userId}/sends/`)
+      .then((rows) => rows.map((r) => r.key))
+      .catch(() => []);
     console.warn('[send-access] file bytes missing', {
       sendId: send.id,
+      expectKey: keys.sendFile(send.userId, send.id),
       declaredSize: send.data?.size ?? null,
       createdAt: send.createdAt ?? null,
+      siblings,
     });
     return c.json({ error: 'file not found', reason: 'upload_incomplete' }, 404);
   }
