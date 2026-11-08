@@ -151,11 +151,48 @@ async function main() {
   // 上游 index.html 里有一条历史遗留的 <link rel="stylesheet" href="css/vaultwarden.css">，
   // 但包内并没有这个文件。请求会落到函数兜底返回 501，每次加载页面都在控制台留一条错误。
   // 补一个空文件即可（真正的样式在 styles.<hash>.css 里）。
-  const indexHtml = readFileSync(join(OUT_DIR, 'index.html'), 'utf8');
+  const indexPath = join(OUT_DIR, 'index.html');
+  let indexHtml = readFileSync(indexPath, 'utf8');
   if (indexHtml.includes('css/vaultwarden.css') && !existsSync(join(OUT_DIR, 'css/vaultwarden.css'))) {
     mkdirSync(join(OUT_DIR, 'css'), { recursive: true });
     writeFileSync(join(OUT_DIR, 'css/vaultwarden.css'), '/* placeholder: upstream index.html links this file but does not ship it */\n');
     log('补齐缺失的 css/vaultwarden.css（避免每次加载都 501）');
+  }
+
+  // 2026.10.1 的 Web 前端把 bit-form-field 里的输入框渲染了两次（Angular 21 内容投影
+  // 的回归）：真实输入框带 data-testid，重复的那个只有自动生成的 id="bit-form-field-N"，
+  // 并在输入框下方显示成一串灰色文字。
+  // 这里只把「同一父节点下、与别的输入框共用同一个 formcontrolname、且没有 data-testid」
+  // 的那个隐藏掉；真正的输入框、Angular 绑定和表单流程都不受影响。
+  if (!indexHtml.includes('data-warden-dedup')) {
+    const dedup = [
+      '<script data-warden-dedup="1">',
+      '(function(){',
+      '  function fix(){',
+      '    var n=0;',
+      '    var list=document.querySelectorAll(\'input[id^="bit-form-field-"]:not([data-testid])\');',
+      '    for(var i=0;i<list.length;i++){',
+      '      var el=list[i], nm=el.getAttribute("formcontrolname");',
+      '      if(!nm||!el.parentElement)continue;',
+      '      var peers=el.parentElement.querySelectorAll(\'input[formcontrolname="\'+nm+\'"]\');',
+      '      if(peers.length>1&&el.style.display!=="none"){el.style.setProperty("display","none","important");n++;}',
+      '    }',
+      '    if(n)document.documentElement.setAttribute("data-warden-dedup",String(n));',
+      '  }',
+      '  var pending=false;',
+      '  function schedule(){if(pending)return;pending=true;requestAnimationFrame(function(){pending=false;try{fix();}catch(e){}});}',
+      '  try{fix();}catch(e){}',
+      '  try{new MutationObserver(schedule).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}',
+      '})();',
+      '</script>',
+    ].join('\n');
+    if (indexHtml.includes('</body>')) {
+      indexHtml = indexHtml.replace('</body>', dedup + '\n</body>');
+      writeFileSync(indexPath, indexHtml);
+      log('已注入重复输入框修复脚本');
+    } else {
+      log('警告：index.html 里没有 </body>，跳过重复输入框修复');
+    }
   }
 
   log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);
