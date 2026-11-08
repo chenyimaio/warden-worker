@@ -1990,8 +1990,16 @@ app.post('/api/sends/file/v2', async (c) => {
   }
   const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
   if (direct) {
+    console.log('[send] create -> presigned', { id, size, directMax });
     return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
   }
+  console.log('[send] create -> function url', {
+    id,
+    size,
+    enabled: directUploadEnabled(c),
+    directMax,
+    uploadMax: Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0,
+  });
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
@@ -2017,6 +2025,17 @@ app.post('/api/sends/file/v2', async (c) => {
 async function uploadSendFile(c) {
   const store = getStore(c.env);
   const id = c.req.param('id');
+
+  // 诊断：只有走到这里才说明客户端把字节发给了函数（而不是预签名直传）。
+  // 大文件在这里之前就会被平台按请求体上限拦成 500，所以这行日志是判断
+  // 「客户端到底用了哪个 url」的关键证据。
+  console.log('[send-upload] hit function', {
+    id,
+    contentLength: c.req.header('content-length') ?? null,
+    contentType: (c.req.header('content-type') ?? '').slice(0, 60) || null,
+    auth: c.req.header('authorization') ? 'present' : 'absent',
+    token: new URL(c.req.url).search ? 'yes' : 'no',
+  });
 
   // EdgeOne 对单次请求体有硬上限（实测 6MB 可以、7MB 直接被平台拦成 500
   // INTERNAL_CLOUD_FUNCTION_INVOCATION_FAILED）。提前用 Content-Length 拦掉，

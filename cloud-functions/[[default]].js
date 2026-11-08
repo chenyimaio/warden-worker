@@ -16715,8 +16715,16 @@ app.post("/api/sends/file/v2", async (c) => {
   }
   const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
   if (direct) {
+    console.log("[send] create -> presigned", { id, size, directMax });
     return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
   }
+  console.log("[send] create -> function url", {
+    id,
+    size,
+    enabled: directUploadEnabled(c),
+    directMax,
+    uploadMax: Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0
+  });
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),
@@ -16732,6 +16740,13 @@ app.post("/api/sends/file/v2", async (c) => {
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
   const id = c.req.param("id");
+  console.log("[send-upload] hit function", {
+    id,
+    contentLength: c.req.header("content-length") ?? null,
+    contentType: (c.req.header("content-type") ?? "").slice(0, 60) || null,
+    auth: c.req.header("authorization") ? "present" : "absent",
+    token: new URL(c.req.url).search ? "yes" : "no"
+  });
   const maxBytes = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header("content-length") || 0);
   if (maxBytes && declared > maxBytes) {
