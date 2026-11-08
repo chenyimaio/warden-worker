@@ -15,7 +15,7 @@
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
 // 落地页会探测 /vault/index.html，构建失败时不会把用户重定向到空目录。
-import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
@@ -33,11 +33,26 @@ const enabled = String(process.env.WEB_VAULT_ENABLED ?? 'true').toLowerCase() !=
 const log = (...a) => console.log('[web-vault]', ...a);
 const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
+// 站点自带的额外静态文件（诊断页等）放在 <repo>/edgeone/diag，构建后拷进站点根。
+// public/ 每次构建都会被清空重建，所以不能直接放进去。
+const EXTRA_DIR = resolve(here, '../diag');
+function copyExtra() {
+  if (!existsSync(EXTRA_DIR)) return;
+  for (const entry of readdirSync(EXTRA_DIR, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const dst = join(OUT_DIR, entry.name);
+    mkdirSync(OUT_DIR, { recursive: true });
+    writeFileSync(dst, readFileSync(join(EXTRA_DIR, entry.name)));
+    log(`附加文件 -> ${entry.name}`);
+  }
+}
+
 if (!enabled) {
   // 落地页已删除，public/ 里没有别的东西；这里保证输出目录存在，
   // 否则 EdgeOne 会因为「输出目录不存在」直接判定构建失败。
   mkdirSync(OUT_DIR, { recursive: true });
   log('WEB_VAULT_ENABLED=false，跳过下载');
+  copyExtra();
   process.exit(0);
 }
 
@@ -147,6 +162,7 @@ async function main() {
   if (!existsSync(join(OUT_DIR, 'index.html'))) {
     throw new Error('产物里没有 index.html，站点根选错了');
   }
+  copyExtra();
   log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);
 }
 
