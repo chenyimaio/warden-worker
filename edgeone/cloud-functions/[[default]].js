@@ -16741,25 +16741,15 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
   const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
-  if (size > BLOB_OBJECT_MAX_BYTES) {
+  if (functionMax && size > functionMax) {
+    console.warn("[send] create rejected, too large", { id, size, functionMax });
     return c.json(
-      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      {
+        error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: functionMax
+      },
       413
     );
-  }
-  if (size > functionMax) {
-    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-    if (!direct) {
-      return c.json(
-        {
-          error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB`,
-          limit: functionMax
-        },
-        413
-      );
-    }
-    console.log("[send] create -> presigned", { id, size, functionMax });
-    return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
   console.log("[send] create -> function url", { id, size, functionMax });
   const uploadToken = await signAccess(c.env, {

@@ -105,9 +105,11 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 |---|---|---|
 | `PASSWORD_ITERATIONS` | `600000` | 服务端对客户端 `masterPasswordHash` 再套一层 PBKDF2 时的迭代次数。改大更慢更安全，**改小会让老账号登录失败** |
 | `ALLOW_TOTP_DRIFT` | `true` | TOTP 是否允许 ±1 个时间步的时钟漂移。`false` 更严格，但客户端时钟偏差会导致验证失败 |
-| `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | 仅**回退路径**（存储不支持预签名直传时）的单次请求体上限，同时管附件和文件 Send。EdgeOne 硬上限约 6 MB，调大没用，只会让客户端拿到平台的 500 而不是明确的 413 |
+| `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | **文件 Send 的硬上限**：官方客户端始终把字节 POST 给函数，受平台请求体限制，超过直接 413。附件不走这条限制（见下方说明） |
 
-> **上传默认走预签名直传**：创建附件/文件 Send 时返回 Blob 的预签名 PUT URL（`fileUploadType: 0`），客户端把字节直接传到 Blob，不经过函数 —— 单文件上限因此是 **Blob 单对象上限 25 MiB**（硬编码，不需要环境变量）。只有当存储不支持预签名（例如本地 `memory` 驱动）或生成 URL 出错时，才回退到函数内上传，那时才受 `UPLOAD_MAX_BYTES` 约束。
+> **上传上限分两种，别混：**
+> - **文件 Send**：实测 Android/Web 客户端无论 `fileUploadType` 是 0 还是 1，都会把字节 POST 到 `/api/sends/{id}/file/{id}`，**忽略预签名地址**。所以上限 = 平台请求体上限 ≈ 6 MB（`UPLOAD_MAX_BYTES`），超过时我们返回明确的 413；再大就只能等平台放开（实测 8.98 MB 会被平台直接 `RequestTooLarge` 拒绝，客户端只显示一句 400/500）。
+> - **附件**：客户端会使用 `attachment/v2` 返回的 url，所以走 **Blob 预签名直传**，上限是 Blob 单对象 **25 MiB**（硬编码，不需要环境变量）。
 
 ### 4.4 网页版（构建期，改了要重新部署）
 

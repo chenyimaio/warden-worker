@@ -94,19 +94,10 @@ check(
   r.data,
 );
 
-// 2) 大文件（> 6MiB）走直传 -> Blob URL + type 0（Azure 语义）
-r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'presigned') });
-check(
-  '支持预签名时返回 Blob 地址',
-  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'),
-  r.data,
-);
-check('直传使用 fileUploadType 0（客户端才会 PUT 到 url）', r.data.fileUploadType === 0, r.data.fileUploadType);
-check('直传 key 是 sendFile 布局', String(lastKey ?? '').includes('/sends/'), lastKey);
-
-// 3) 超过 Blob 单对象上限 -> 413（在拿到上传地址之前就拒绝）
-r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(30 * 1024 * 1024, 'toobig') });
-check('超过 25MiB 返回 413', r.status === 413, r);
+// 2) 文件 Send 超过函数上限 -> 413（客户端只走函数上传，直传对 Send 无效）
+r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'toobig') });
+check('文件 Send 超过 6MiB 返回 413', r.status === 413, r);
+check('413 里带明确上限', String(r.data.error ?? '').includes('6.0 MB'), r.data);
 
 // 4) 附件同样走直传
 const cipher = await call('POST', '/api/ciphers', {

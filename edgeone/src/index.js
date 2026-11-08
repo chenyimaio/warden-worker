@@ -1997,30 +1997,20 @@ app.post('/api/sends/file/v2', async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
-  // 大文件走直传：客户端把字节直接 PUT 到 Blob（预签名 URL），不经过函数，
-  // 因此能突破平台「单次请求体约 6MB」的限制，上限是 Blob 单对象 25 MiB。
-  // 小文件仍然走函数上传 —— 那条路已经被真机验证过，没必要为了大文件去冒险。
+  // 文件 Send 只能走函数上传：实测 Android 客户端无论 fileUploadType 是 0 还是 1，
+  // 都会把字节 POST 到 /api/sends/{id}/file/{id}（忽略我们给的预签名地址），
+  // 所以上限就是平台请求体上限。超过时给明确的 413，而不是让平台返回
+  // RequestTooLarge（客户端只会显示一句没头没脑的 400/500）。
   const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
-  if (size > BLOB_OBJECT_MAX_BYTES) {
+  if (functionMax && size > functionMax) {
+    console.warn('[send] create rejected, too large', { id, size, functionMax });
     return c.json(
-      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      {
+        error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: functionMax,
+      },
       413,
     );
-  }
-  if (size > functionMax) {
-    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-    if (!direct) {
-      return c.json(
-        {
-          error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB`,
-          limit: functionMax,
-        },
-        413,
-      );
-    }
-    // 0 = Azure 语义：客户端直接把字节 PUT 到这个 url（不走认证 API、不经过函数）
-    console.log('[send] create -> presigned', { id, size, functionMax });
-    return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
   console.log('[send] create -> function url', { id, size, functionMax });
 
