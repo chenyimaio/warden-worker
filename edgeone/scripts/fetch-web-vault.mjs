@@ -170,7 +170,7 @@ async function main() {
       '(function(){',
       '  function fix(){',
       '    var n=0;',
-      '    var list=document.querySelectorAll(\'input[id^="bit-form-field-"]:not([data-testid])\');',
+      '    var list=document.querySelectorAll(\'input[formcontrolname]:not([data-testid])\');',
       '    for(var i=0;i<list.length;i++){',
       '      var el=list[i], nm=el.getAttribute("formcontrolname");',
       '      if(!nm||!el.parentElement)continue;',
