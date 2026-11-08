@@ -105,9 +105,9 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 |---|---|---|
 | `PASSWORD_ITERATIONS` | `600000` | 服务端对客户端 `masterPasswordHash` 再套一层 PBKDF2 时的迭代次数。改大更慢更安全，**改小会让老账号登录失败** |
 | `ALLOW_TOTP_DRIFT` | `true` | TOTP 是否允许 ±1 个时间步的时钟漂移。`false` 更严格，但客户端时钟偏差会导致验证失败 |
-| `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | **走函数**上传时的单次请求体上限，同时管附件和文件 Send。EdgeOne 硬上限约 6 MB，调大没用，只会让客户端拿到平台的 500 而不是明确的 413 |
-| `DIRECT_UPLOAD_ENABLED` | `false` | 预签名直传开关：`true` 时创建附件/文件 Send 返回 Blob 的预签名 PUT URL，客户端把字节**直接传到 Blob**，不经过函数 → 单文件上限从 6 MiB 提到 Blob 单对象上限（约 25 MiB），且不占函数内存/CPU |
-| `DIRECT_UPLOAD_MAX_BYTES` | `26214400`（25 MiB） | 直传时的单文件上限，超过直接 413。按 Blob 单对象上限设置，别超过 25 MiB |
+| `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | 仅**回退路径**（存储不支持预签名直传时）的单次请求体上限，同时管附件和文件 Send。EdgeOne 硬上限约 6 MB，调大没用，只会让客户端拿到平台的 500 而不是明确的 413 |
+
+> **上传默认走预签名直传**：创建附件/文件 Send 时返回 Blob 的预签名 PUT URL（`fileUploadType: 0`），客户端把字节直接传到 Blob，不经过函数 —— 单文件上限因此是 **Blob 单对象上限 25 MiB**（硬编码，不需要环境变量）。只有当存储不支持预签名（例如本地 `memory` 驱动）或生成 URL 出错时，才回退到函数内上传，那时才受 `UPLOAD_MAX_BYTES` 约束。
 
 ### 4.4 网页版（构建期，改了要重新部署）
 

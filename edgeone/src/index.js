@@ -1420,15 +1420,16 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
 
-  // 优先直传：客户端把字节 PUT 到 Blob，不经过函数（上限按 DIRECT_UPLOAD_MAX_BYTES）
-  const directMax = directUploadMax(c);
-  if (directMax && declaredSize > directMax) {
+  // 优先直传：客户端把字节 PUT 到 Blob（预签名 URL），不经过函数。
+  // 这样单文件上限从平台的 ~6MB 提到 Blob 单对象上限（25 MiB）。
+  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
-      { error: `Attachment too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413,
     );
   }
   const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  console.log('[attachment] create', { id, size: declaredSize, direct: Boolean(direct) });
 
   return c.json({
     attachmentId: id,
@@ -1440,20 +1441,13 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 // readUpload 已移到 ./upload.js（手工 multipart 解析，见该文件顶部说明）
 
 // ---- 直传（预签名 URL）----
-// 打开后，创建附件/文件 Send 时返回的 url 指向 Blob 的预签名 PUT 地址，
-// 客户端把字节直接传上去，不经过函数 —— 因此不受平台「单次请求体约 6MB」限制，
-// 只受 Blob 单对象上限（默认按 25 MiB 处理）约束。
-function directUploadEnabled(c) {
-  return String(envGet(c, 'DIRECT_UPLOAD_ENABLED', 'false')).toLowerCase() === 'true';
-}
+// 默认就走直传：创建附件/文件 Send 时返回 Blob 的预签名 PUT 地址，
+// 客户端把字节直接传上去，不经过函数 —— 因此不受平台「单次请求体约 6MB」限制。
+// 只受 Blob 单对象上限约束（25 MiB，硬编码，不需要环境变量）。
+const BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
 
-function directUploadMax(c) {
-  return Number(envGet(c, 'DIRECT_UPLOAD_MAX_BYTES', 25 * 1024 * 1024)) || 0;
-}
-
-/** 生成预签名直传 URL；未启用 / SDK 不支持 / 出错时返回 null（调用方回退到函数内上传） */
+/** 生成预签名直传 URL；SDK 不支持 / 出错时返回 null（调用方回退到函数内上传） */
 async function presignedUploadUrl(c, key) {
-  if (!directUploadEnabled(c)) return null;
   try {
     const url = await getStore(c.env).createUploadUrl(key, { expireSeconds: 3600 });
     return url || null;
@@ -1989,24 +1983,22 @@ app.post('/api/sends/file/v2', async (c) => {
   await touchUser(store, a.claims.sub);
 
   // 优先直传：客户端把字节直接 PUT 到 Blob（预签名 URL），不经过函数。
-  // 这样单文件上限从平台的 ~6MB 提到 Blob 单对象上限（DIRECT_UPLOAD_MAX_BYTES，默认 25 MiB）。
-  const directMax = directUploadMax(c);
-  if (directMax && size > directMax) {
+  // 单文件上限因此从平台的 ~6MB 提到 Blob 单对象上限（25 MiB）。
+  if (size > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
-      { error: `File too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413,
     );
   }
   const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
   if (direct) {
-    console.log('[send] create -> presigned', { id, size, directMax });
-    return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
+    // 0 = Azure 语义：客户端直接把字节 PUT 到这个 url（不走认证 API、不经过函数）
+    console.log('[send] create -> presigned', { id, size });
+    return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
   console.log('[send] create -> function url', {
     id,
     size,
-    enabled: directUploadEnabled(c),
-    directMax,
     uploadMax: Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0,
   });
 

@@ -16221,27 +16221,21 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     createdAt: nowIso()
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
-  const directMax = directUploadMax(c);
-  if (directMax && declaredSize > directMax) {
+  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
-      { error: `Attachment too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413
     );
   }
   const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  console.log("[attachment] create", { id, size: declaredSize, direct: Boolean(direct) });
   return c.json({
     attachmentId: id,
     url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`
   });
 });
-function directUploadEnabled(c) {
-  return String(envGet(c, "DIRECT_UPLOAD_ENABLED", "false")).toLowerCase() === "true";
-}
-function directUploadMax(c) {
-  return Number(envGet(c, "DIRECT_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)) || 0;
-}
+var BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
 async function presignedUploadUrl(c, key) {
-  if (!directUploadEnabled(c)) return null;
   try {
     const url = await getStore2(c.env).createUploadUrl(key, { expireSeconds: 3600 });
     return url || null;
@@ -16713,23 +16707,20 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
-  const directMax = directUploadMax(c);
-  if (directMax && size > directMax) {
+  if (size > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
-      { error: `File too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413
     );
   }
   const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
   if (direct) {
-    console.log("[send] create -> presigned", { id, size, directMax });
-    return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
+    console.log("[send] create -> presigned", { id, size });
+    return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
   console.log("[send] create -> function url", {
     id,
     size,
-    enabled: directUploadEnabled(c),
-    directMax,
     uploadMax: Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0
   });
   const uploadToken = await signAccess(c.env, {

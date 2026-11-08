@@ -1,7 +1,8 @@
 // scripts/test-direct-upload.mjs
-// 预签名直传：开启 DIRECT_UPLOAD_ENABLED 后，创建附件/文件 Send 返回的 url 应指向 Blob，
-// 而不是本函数；超过 DIRECT_UPLOAD_MAX_BYTES 直接 413。
-// 用内存存储 + 打桩的 createUploadUrl 验证接线，不依赖真实 Blob。
+// 直传是默认行为：
+//   - 存储支持预签名（Blob）-> 返回 Blob URL + fileUploadType 0（Azure 语义）
+//   - 存储不支持（内存）    -> 回退到函数内上传 + fileUploadType 1
+//   - 超过 25 MiB（Blob 单对象上限）-> 413
 import app from '../src/index.js';
 import { getStore } from '../src/store.js';
 
@@ -23,15 +24,9 @@ const base = {
   BASE_URL: 'https://vault.example.com',
 };
 
-// 给内存存储打桩：模拟 SDK 的 createUploadUrl
 const store = getStore(base);
-let lastKey = null;
-store.createUploadUrl = async (key) => {
-  lastKey = key;
-  return `https://blob.example.com/${encodeURI(key)}?signature=stub`;
-};
 
-const call = async (env, method, path, { body, token } = {}) => {
+const call = async (method, path, { body, token } = {}) => {
   const headers = {};
   let payload;
   if (body !== undefined) {
@@ -39,7 +34,7 @@ const call = async (env, method, path, { body, token } = {}) => {
     payload = JSON.stringify(body);
   }
   if (token) headers.authorization = `Bearer ${token}`;
-  const res = await app.fetch(new Request(`https://x${path}`, { method, headers, body: payload }), env);
+  const res = await app.fetch(new Request(`https://x${path}`, { method, headers, body: payload }), base);
   const text = await res.text();
   let data;
   try {
@@ -51,7 +46,7 @@ const call = async (env, method, path, { body, token } = {}) => {
 };
 
 const email = `direct-${Date.now()}@example.com`;
-await call(base, 'POST', '/api/accounts/register', {
+await call('POST', '/api/accounts/register', {
   body: {
     email,
     masterPasswordHash: 'm',
@@ -61,14 +56,7 @@ await call(base, 'POST', '/api/accounts/register', {
     kdfIterations: 100000,
   },
 });
-const tok = (
-  await call(base, 'POST', '/identity/connect/token', {
-    body: undefined,
-    token: null,
-  })
-).status;
 
-// 用 form 拿 token
 const formRes = await app.fetch(
   new Request('https://x/identity/connect/token', {
     method: 'POST',
@@ -88,31 +76,38 @@ const formRes = await app.fetch(
 );
 const token = (await formRes.json()).access_token;
 
-// 1) 关闭直传：url 指向本函数
-let r = await call(base, 'POST', '/api/sends/file/v2', {
-  token,
-  body: { type: 1, name: 'a', key: 'k', deletionDate: new Date(Date.now() + 86400e3).toISOString(), fileLength: 1024 },
-});
-check('关闭直传时 url 指向本函数', r.status === 200 && String(r.data.url).includes('/api/sends/'), r.data);
+const deletionDate = new Date(Date.now() + 86400e3).toISOString();
+const sendBody = (size, name) => ({ type: 1, name, key: 'k', deletionDate, fileLength: size });
 
-// 2) 开启直传：url 指向 Blob，key 是 sendFile
-const directEnv = { ...base, DIRECT_UPLOAD_ENABLED: 'true' };
-r = await call(directEnv, 'POST', '/api/sends/file/v2', {
-  token,
-  body: { type: 1, name: 'b', key: 'k', deletionDate: new Date(Date.now() + 86400e3).toISOString(), fileLength: 8 * 1024 * 1024 },
-});
-check('开启直传时 url 指向 Blob', r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'), r.data);
+// 1) 内存存储不支持预签名 -> 回退到函数内上传，type 1
+let r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(1024, 'fallback') });
+check(
+  '存储不支持预签名时回退到函数地址',
+  r.status === 200 && r.data.fileUploadType === 1 && String(r.data.url).includes('/api/sends/'),
+  r.data,
+);
+
+// 2) 存储支持预签名 -> Blob URL + type 0（Azure 语义）
+let lastKey = null;
+store.createUploadUrl = async (key) => {
+  lastKey = key;
+  return `https://blob.example.com/${encodeURI(key)}?signature=stub`;
+};
+r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'presigned') });
+check(
+  '支持预签名时返回 Blob 地址',
+  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'),
+  r.data,
+);
+check('直传使用 fileUploadType 0（客户端才会 PUT 到 url）', r.data.fileUploadType === 0, r.data.fileUploadType);
 check('直传 key 是 sendFile 布局', String(lastKey ?? '').includes('/sends/'), lastKey);
 
-// 3) 超过直传上限 -> 413
-r = await call(directEnv, 'POST', '/api/sends/file/v2', {
-  token,
-  body: { type: 1, name: 'c', key: 'k', deletionDate: new Date(Date.now() + 86400e3).toISOString(), fileLength: 30 * 1024 * 1024 },
-});
+// 3) 超过 Blob 单对象上限 -> 413（在拿到上传地址之前就拒绝）
+r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(30 * 1024 * 1024, 'toobig') });
 check('超过 25MiB 返回 413', r.status === 413, r);
 
-// 4) 附件也走直传
-const cipher = await call(base, 'POST', '/api/ciphers', {
+// 4) 附件同样走直传
+const cipher = await call('POST', '/api/ciphers', {
   token,
   body: {
     type: 1,
@@ -128,11 +123,17 @@ const cipher = await call(base, 'POST', '/api/ciphers', {
   },
 });
 const cipherId = cipher.data?.id ?? cipher.data?.Id;
-r = await call(directEnv, 'POST', `/api/ciphers/${cipherId}/attachment/v2`, {
+r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,
   body: { fileName: '2.enc', fileSize: 9 * 1024 * 1024, key: '2.k' },
 });
-check('附件直传 url 指向 Blob', r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'), r.data);
+check('附件直传返回 Blob 地址', r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'), r.data);
+
+r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
+  token,
+  body: { fileName: 'big.enc', fileSize: 26 * 1024 * 1024, key: '2.k' },
+});
+check('附件超过 25MiB 返回 413', r.status === 413, r);
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exitCode = failed === 0 ? 0 : 1;
