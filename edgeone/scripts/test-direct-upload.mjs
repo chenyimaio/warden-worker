@@ -89,17 +89,21 @@ store.createUploadUrl = async (key) => {
 // 1) 小文件（<= 6MiB）走函数上传，即使存储支持预签名也不改行为
 let r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(1024, 'small') });
 check(
-  '小文件走函数地址（fileUploadType 1）',
-  r.status === 200 && r.data.fileUploadType === 1 && String(r.data.url).includes('/api/sends/'),
+  '小文件走函数地址（fileUploadType 0 = DIRECT）',
+  r.status === 200 && r.data.fileUploadType === 0 && String(r.data.url).includes('/api/sends/'),
   r.data,
 );
 
-// 2) 文件 Send 超过函数上限 -> 413（客户端只走函数上传，直传对 Send 无效）
-r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'toobig') });
-check('文件 Send 超过 6MiB 返回 413', r.status === 413, r);
-check('413 里带明确上限', String(r.data.error ?? '').includes('6.0 MB'), r.data);
+// 2) 文件 Send 超过函数上限 -> 预签名直传 + fileUploadType 1（AZURE）
+r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'big') });
+check(
+  '文件 Send 超过 6MiB 走直传',
+  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/') && r.data.fileUploadType === 1,
+  r.data,
+);
+check('直传 key 是 sendFile 布局', String(lastKey ?? '').includes('/sends/'), lastKey);
 
-// 4) 附件：客户端同样忽略 url，统一走函数上传
+// 4) 附件：小附件走函数，大附件走预签名（fileUploadType 1 = AZURE）
 const cipher = await call('POST', '/api/ciphers', {
   token,
   body: {
@@ -121,8 +125,8 @@ r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   body: { fileName: '2.enc', fileSize: 5 * 1024 * 1024, key: '2.k' },
 });
 check(
-  '附件返回函数地址且 fileUploadType=1',
-  r.status === 200 && String(r.data.url).includes('/api/ciphers/') && r.data.fileUploadType === 1,
+  '小附件返回函数地址且 fileUploadType=0',
+  r.status === 200 && String(r.data.url).includes('/api/ciphers/') && r.data.fileUploadType === 0,
   r.data,
 );
 check(
@@ -135,9 +139,19 @@ check(
 
 r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,
-  body: { fileName: 'big.enc', fileSize: 7 * 1024 * 1024, key: '2.k' },
+  body: { fileName: 'big.enc', fileSize: 9 * 1024 * 1024, key: '2.k' },
 });
-check('附件超过 6MiB 返回 413', r.status === 413, r);
+check(
+  '大附件走预签名（fileUploadType=1）',
+  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/') && r.data.fileUploadType === 1,
+  r.data,
+);
+
+r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
+  token,
+  body: { fileName: 'huge.enc', fileSize: 26 * 1024 * 1024, key: '2.k' },
+});
+check('附件超过 25MiB 返回 413', r.status === 413, r);
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exitCode = failed === 0 ? 0 : 1;
