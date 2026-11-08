@@ -1797,6 +1797,13 @@ app.post('/api/sends/access/:accessId', async (c) => {
   if (rl) return rl;
   const store = getStore(c.env);
   const send = await lookupSendByAccessId(store, c.req.param('accessId'));
+  console.log('[send-access] lookup', {
+    accessId: c.req.param('accessId'),
+    found: Boolean(send),
+    type: send?.type ?? null,
+    sendId: send?.id ?? null,
+    declaredSize: send?.data?.size ?? null,
+  });
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
 
   const v = validateSendAccess(send);
