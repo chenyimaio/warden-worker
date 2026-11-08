@@ -99,7 +99,7 @@ r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 
 check('文件 Send 超过 6MiB 返回 413', r.status === 413, r);
 check('413 里带明确上限', String(r.data.error ?? '').includes('6.0 MB'), r.data);
 
-// 4) 附件同样走直传
+// 4) 附件：客户端同样忽略 url，统一走函数上传
 const cipher = await call('POST', '/api/ciphers', {
   token,
   body: {
@@ -118,10 +118,13 @@ const cipher = await call('POST', '/api/ciphers', {
 const cipherId = cipher.data?.id ?? cipher.data?.Id;
 r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,
-  body: { fileName: '2.enc', fileSize: 9 * 1024 * 1024, key: '2.k' },
+  body: { fileName: '2.enc', fileSize: 5 * 1024 * 1024, key: '2.k' },
 });
-check('附件直传返回 Blob 地址', r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'), r.data);
-check('附件返回 fileUploadType=0', r.data.fileUploadType === 0, r.data.fileUploadType);
+check(
+  '附件返回函数地址且 fileUploadType=1',
+  r.status === 200 && String(r.data.url).includes('/api/ciphers/') && r.data.fileUploadType === 1,
+  r.data,
+);
 check(
   '附件返回 cipherResponse 且带刚建的附件',
   r.data.cipherResponse?.id === cipherId &&
@@ -132,9 +135,9 @@ check(
 
 r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,
-  body: { fileName: 'big.enc', fileSize: 26 * 1024 * 1024, key: '2.k' },
+  body: { fileName: 'big.enc', fileSize: 7 * 1024 * 1024, key: '2.k' },
 });
-check('附件超过 25MiB 返回 413', r.status === 413, r);
+check('附件超过 6MiB 返回 413', r.status === 413, r);
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exitCode = failed === 0 ? 0 : 1;

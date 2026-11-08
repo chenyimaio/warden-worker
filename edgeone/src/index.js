@@ -1413,16 +1413,21 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
 
-  // 大附件走直传（小附件保持函数上传，行为不变）
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
+  // 实测（2026.8 安卓客户端）：即使 attachment/v2 返回了预签名直传地址，
+  // 它仍然把字节 POST 给函数（日志里能看到紧接着的
+  // /api/ciphers/{id}/attachment/{aid} 请求），所以直传对附件同样无效。
+  // 统一走函数上传，并用 UPLOAD_MAX_BYTES 给出明确上限。
+  const uploadMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  if (uploadMax && declaredSize > uploadMax) {
     return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      {
+        error: `Attachment too large: this deployment accepts uploads up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: uploadMax,
+      },
       413,
     );
   }
-  // 附件一律先尝试预签名直传：客户端如果用 url，字节就不经过函数；
-  // 如果它仍然 POST 给函数，小文件也能成功（≤ UPLOAD_MAX_BYTES），不会破坏功能。
-  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  const direct = null;
 
   const meta = {
     id,
@@ -1431,12 +1436,10 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
     fileName: String(p.fileName ?? 'file'),
     fileSize: declaredSize,
     key: p.key ?? null,
-    // 探针：记下这次是否给了预签名地址，用来判断客户端会不会真的去用它
-    direct: Boolean(direct),
     createdAt: nowIso(),
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
-  console.log('[attachment] create', { id, size: declaredSize, direct: Boolean(direct) });
+  console.log('[attachment] create', { id, size: declaredSize, limit: uploadMax });
 
   // 安卓客户端的 AttachmentJsonResponse.Success 强制要求 fileUploadType 和
   // cipherResponse 两个字段（缺任何一个就抛 MissingFieldException），
@@ -1462,9 +1465,6 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 // ---- 直传（预签名 URL）----
 // 默认就走直传：创建附件/文件 Send 时返回 Blob 的预签名 PUT 地址，
 // 客户端把字节直接传上去，不经过函数 —— 因此不受平台「单次请求体约 6MB」限制。
-// 只受 Blob 单对象上限约束（25 MiB，硬编码，不需要环境变量）。
-const BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
-
 /** 生成预签名直传 URL；SDK 不支持 / 出错时返回 null（调用方回退到函数内上传） */
 async function presignedUploadUrl(c, key) {
   try {
@@ -1495,19 +1495,20 @@ async function uploadAttachmentBytes(c) {
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: 'not found' }, 404);
 
-  if (meta.direct) {
-    console.warn('[attachment] client ignored the presigned url and uploaded through the function', {
-      aid,
-      size: c.req.header('content-length') ?? null,
-      contentType: (c.req.header('content-type') ?? '').slice(0, 60) || null,
-    });
-  }
   // 字节已经在了（客户端先直传成功、又补发了一次确认请求）：直接当成功返回，
   // 免得重复上传把请求体撑爆。
   const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
   if (existing) return c.json({});
 
-  const up = await readUpload(c);
+  let up;
+  try {
+    up = await readUpload(c);
+  } catch (e) {
+    // 平台重放同一个 Request 时 body 可能已被读过（"Body is unusable"），
+    // 以前这里会直接抛成 500，客户端只能看到 Internal Error。
+    console.error('[attachment] read body failed', e?.message || e);
+    return c.json({ error: 'failed to read upload body' }, 400);
+  }
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
   if (platformMax && bytes.length > platformMax) return c.json({ error: 'Attachment too large', limit: platformMax }, 413);

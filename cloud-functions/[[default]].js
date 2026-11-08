@@ -16236,13 +16236,17 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   if (!cipher) return c.json({ error: "not found" }, 404);
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
+  const uploadMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  if (uploadMax && declaredSize > uploadMax) {
     return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
+      {
+        error: `Attachment too large: this deployment accepts uploads up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        limit: uploadMax
+      },
       413
     );
   }
-  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  const direct = null;
   const meta = {
     id,
     cipherId,
@@ -16250,12 +16254,10 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     fileName: String(p.fileName ?? "file"),
     fileSize: declaredSize,
     key: p.key ?? null,
-    // 探针：记下这次是否给了预签名地址，用来判断客户端会不会真的去用它
-    direct: Boolean(direct),
     createdAt: nowIso()
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
-  console.log("[attachment] create", { id, size: declaredSize, direct: Boolean(direct) });
+  console.log("[attachment] create", { id, size: declaredSize, limit: uploadMax });
   const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
   const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
   const touched = await mutate(
@@ -16271,16 +16273,6 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     cipherResponse: cipherToJson(touched ?? cipher, attachments)
   });
 });
-var BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
-async function presignedUploadUrl(c, key) {
-  try {
-    const url = await getStore2(c.env).createUploadUrl(key, { expireSeconds: 3600 });
-    return url || null;
-  } catch (e) {
-    console.warn("[upload] presigned url failed, falling back to function upload:", e?.message || e);
-    return null;
-  }
-}
 async function uploadAttachmentBytes(c) {
   const platformMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header("content-length") || 0);
@@ -16296,16 +16288,15 @@ async function uploadAttachmentBytes(c) {
   const { id: cipherId, aid } = c.req.param();
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, aid)))?.value;
   if (!meta || meta.cipherId !== cipherId) return c.json({ error: "not found" }, 404);
-  if (meta.direct) {
-    console.warn("[attachment] client ignored the presigned url and uploaded through the function", {
-      aid,
-      size: c.req.header("content-length") ?? null,
-      contentType: (c.req.header("content-type") ?? "").slice(0, 60) || null
-    });
-  }
   const existing = await store.getBinary(keys.attachmentData(a.claims.sub, aid)).catch(() => null);
   if (existing) return c.json({});
-  const up = await readUpload(c);
+  let up;
+  try {
+    up = await readUpload(c);
+  } catch (e) {
+    console.error("[attachment] read body failed", e?.message || e);
+    return c.json({ error: "failed to read upload body" }, 400);
+  }
   if (up.error) return c.json({ error: up.error }, 400);
   const bytes = up.bytes;
   if (platformMax && bytes.length > platformMax) return c.json({ error: "Attachment too large", limit: platformMax }, 413);
