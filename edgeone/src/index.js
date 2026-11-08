@@ -2787,8 +2787,8 @@ exported.use('*', cors());
 // 落地页（public/index.html）已删除：根路径直接跳到网页版。
 // 这两条必须注册在下面两个 route() 之前，否则会被 app 里的 all('*') 兜底先命中；
 // 另外它们只挂在 exported 上，不会随 /vault 前缀再挂一次（否则 /vault/ 会自己跳自己）。
-exported.get('/', (c) => c.redirect('/vault/', 302));
-exported.get('/index.html', (c) => c.redirect('/vault/', 302));
+exported.get('/', (c) => c.redirect('/vault/index.html', 302));
+exported.get('/index.html', (c) => c.redirect('/vault/index.html', 302));
 // 先挂 /vault：app 里有一条 all('*') 兜底，若先挂根路径会把它也挂到最前面，
 // 导致 /vault/api/config 先被兜底命中（501）。
 exported.route('/vault', app);
