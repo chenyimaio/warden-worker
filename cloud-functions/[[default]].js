@@ -15362,15 +15362,7 @@ app.post("/api/accounts/password-hint", async (c) => {
   try {
     const user = email ? await findUserByEmail(c, email) : null;
     const hint = (readHint(user) ?? "").trim();
-    if (!user) {
-      console.warn("[hint] no such user", String(email ?? "").toLowerCase());
-    } else if (!hint) {
-      console.warn("[hint] no hint stored", {
-        userId: user.id,
-        hasEncryptedHint: Boolean(user.masterPasswordHintEnc),
-        hintFields: Object.keys(user).filter((k) => k.toLowerCase().includes("hint"))
-      });
-    } else {
+    if (user && hint) {
       const base = String(envGet(c, "BASE_URL", new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
     }
@@ -15380,7 +15372,6 @@ app.post("/api/accounts/password-hint", async (c) => {
   return c.json({});
 });
 app.post("/identity/connect/token", async (c) => {
-  const tStart = Date.now();
   const p = await body(c);
   const grant = String(p.grant_type ?? "");
   const store = getStore2(c.env);
@@ -15391,9 +15382,7 @@ app.post("/identity/connect/token", async (c) => {
     if (rlEmail) return rlEmail;
     const rlIp = await limit(c, "login-ip", requestIp(c), 60, 60);
     if (rlIp) return rlIp;
-    const tLookup = Date.now();
     const user = await findUserByEmail(c, email);
-    console.log("[token] timings", { rateLimit: tLookup - tStart, lookup: Date.now() - tLookup });
     if (!user) return c.json({ error: "invalid_grant" }, 400);
     const authRequestId = String(p.authrequest ?? p.authRequest ?? "");
     if (authRequestId) {
@@ -16266,7 +16255,6 @@ async function streamBinary(c, store, key, contentType = "application/octet-stre
     if (stream) {
       const headers = { ...extraHeaders, "content-type": contentType, "cache-control": "no-store" };
       if (size) headers["content-length"] = String(size);
-      console.log("[download] stream", { key, size });
       return c.body(stream, 200, headers);
     }
   } catch (e) {
@@ -16274,7 +16262,6 @@ async function streamBinary(c, store, key, contentType = "application/octet-stre
   }
   const bytes = await store.getBinary(key);
   if (!bytes) return null;
-  console.log("[download] buffer", { key, size: bytes.length });
   return c.body(bytes, 200, {
     ...extraHeaders,
     "content-type": contentType,
@@ -16313,7 +16300,6 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
     createdAt: nowIso()
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
-  console.log("[attachment] create", { id, size: declaredSize, limit: uploadMax });
   const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
   const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
   const touched = await mutate(
@@ -16639,13 +16625,6 @@ app.post("/api/sends/access/:accessId", async (c) => {
   if (rl) return rl;
   const store = getStore2(c.env);
   const send = await lookupSendByAccessId(store, c.req.param("accessId"));
-  console.log("[send-access] lookup", {
-    accessId: c.req.param("accessId"),
-    found: Boolean(send),
-    type: send?.type ?? null,
-    sendId: send?.id ?? null,
-    declaredSize: send?.data?.size ?? null
-  });
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
@@ -16725,17 +16704,7 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) {
-    const siblings = await store.list(`u/${send.userId}/sends/`).then((rows) => rows.map((r) => r.key)).catch(() => []);
-    console.warn("[send-access] file bytes missing", {
-      sendId: send.id,
-      expectKey: keys.sendFile(send.userId, send.id),
-      declaredSize: send.data?.size ?? null,
-      createdAt: send.createdAt ?? null,
-      siblings
-    });
-    return c.json({ error: "file not found", reason: "upload_incomplete" }, 404);
-  }
+  if (!bytes) return c.json({ error: "file not found" }, 404);
   const downloadToken = await signAccess(c.env, {
     sub: "send-access",
     sid: accessIdFromUuid(send.id),
@@ -16816,7 +16785,6 @@ app.post("/api/sends/file/v2", async (c) => {
       413
     );
   }
-  console.log("[send] create -> function url", { id, size, functionMax });
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),
@@ -16832,13 +16800,6 @@ app.post("/api/sends/file/v2", async (c) => {
 async function uploadSendFile(c) {
   const store = getStore2(c.env);
   const id = c.req.param("id");
-  console.log("[send-upload] hit function", {
-    id,
-    contentLength: c.req.header("content-length") ?? null,
-    contentType: (c.req.header("content-type") ?? "").slice(0, 60) || null,
-    auth: c.req.header("authorization") ? "present" : "absent",
-    token: new URL(c.req.url).search ? "yes" : "no"
-  });
   const maxBytes = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header("content-length") || 0);
   if (maxBytes && declared > maxBytes) {

@@ -418,17 +418,7 @@ app.post('/api/accounts/password-hint', async (c) => {
   try {
     const user = email ? await findUserByEmail(c, email) : null;
     const hint = (readHint(user) ?? '').trim();
-    if (!user) {
-      console.warn('[hint] no such user', String(email ?? '').toLowerCase());
-    } else if (!hint) {
-      // 常见原因：账号是「提示加密存」时代建的，只有 masterPasswordHintEnc，
-      // 明文字段为空 → 这里读不到提示，于是什么都不发（接口仍然返回 200）。
-      console.warn('[hint] no hint stored', {
-        userId: user.id,
-        hasEncryptedHint: Boolean(user.masterPasswordHintEnc),
-        hintFields: Object.keys(user).filter((k) => k.toLowerCase().includes('hint')),
-      });
-    } else {
+    if (user && hint) {
       const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
     }
@@ -440,7 +430,6 @@ app.post('/api/accounts/password-hint', async (c) => {
 
 // ---------------------------------------------------------------- identity
 app.post('/identity/connect/token', async (c) => {
-  const tStart = Date.now();
   const p = await body(c);
   const grant = String(p.grant_type ?? '');
   const store = getStore(c.env);
@@ -452,9 +441,7 @@ app.post('/identity/connect/token', async (c) => {
     if (rlEmail) return rlEmail;
     const rlIp = await limit(c, 'login-ip', requestIp(c), 60, 60);
     if (rlIp) return rlIp;
-    const tLookup = Date.now();
     const user = await findUserByEmail(c, email);
-    console.log('[token] timings', { rateLimit: tLookup - tStart, lookup: Date.now() - tLookup });
     if (!user) return c.json({ error: 'invalid_grant' }, 400);
 
     // login with deviceassword  access code
@@ -1250,6 +1237,7 @@ app.post('/api/accounts/password', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
+  // 诊断：客户端到底有没有带提示字段（只打键名，不打值）
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
@@ -1446,7 +1434,6 @@ async function streamBinary(c, store, key, contentType = 'application/octet-stre
     if (stream) {
       const headers = { ...extraHeaders, 'content-type': contentType, 'cache-control': 'no-store' };
       if (size) headers['content-length'] = String(size);
-      console.log('[download] stream', { key, size });
       return c.body(stream, 200, headers);
     }
   } catch (e) {
@@ -1454,7 +1441,6 @@ async function streamBinary(c, store, key, contentType = 'application/octet-stre
   }
   const bytes = await store.getBinary(key);
   if (!bytes) return null;
-  console.log('[download] buffer', { key, size: bytes.length });
   return c.body(bytes, 200, {
     ...extraHeaders,
     'content-type': contentType,
@@ -1498,7 +1484,6 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
     createdAt: nowIso(),
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
-  console.log('[attachment] create', { id, size: declaredSize, limit: uploadMax });
 
   // 安卓客户端的 AttachmentJsonResponse.Success 强制要求 fileUploadType 和
   // cipherResponse 两个字段（缺任何一个就抛 MissingFieldException），
@@ -1871,13 +1856,6 @@ app.post('/api/sends/access/:accessId', async (c) => {
   if (rl) return rl;
   const store = getStore(c.env);
   const send = await lookupSendByAccessId(store, c.req.param('accessId'));
-  console.log('[send-access] lookup', {
-    accessId: c.req.param('accessId'),
-    found: Boolean(send),
-    type: send?.type ?? null,
-    sendId: send?.id ?? null,
-    declaredSize: send?.data?.size ?? null,
-  });
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
 
   const v = validateSendAccess(send);
@@ -1968,23 +1946,7 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) {
-    // 典型场景：创建 Send 成功，但客户端上传那一步失败（平台 500 / 直传 URL 用错），
-    // 于是记录在、字节不在。网页版会显示「找不到与此 Send 关联的文件」。
-    // 顺手把这个用户的 sends 前缀列出来，确认对象是「没写进去」还是「写到了别的 key」。
-    const siblings = await store
-      .list(`u/${send.userId}/sends/`)
-      .then((rows) => rows.map((r) => r.key))
-      .catch(() => []);
-    console.warn('[send-access] file bytes missing', {
-      sendId: send.id,
-      expectKey: keys.sendFile(send.userId, send.id),
-      declaredSize: send.data?.size ?? null,
-      createdAt: send.createdAt ?? null,
-      siblings,
-    });
-    return c.json({ error: 'file not found', reason: 'upload_incomplete' }, 404);
-  }
+  if (!bytes) return c.json({ error: 'file not found' }, 404);
 
   // 网页版（Vaultwarden 2026.x）拿到的是 JSON，然后自己 fetch(url)：
   //   const t = await sendApiService.getSendFileDownloadData(send, token);
@@ -2082,7 +2044,6 @@ app.post('/api/sends/file/v2', async (c) => {
       413,
     );
   }
-  console.log('[send] create -> function url', { id, size, functionMax });
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
@@ -2108,17 +2069,6 @@ app.post('/api/sends/file/v2', async (c) => {
 async function uploadSendFile(c) {
   const store = getStore(c.env);
   const id = c.req.param('id');
-
-  // 诊断：只有走到这里才说明客户端把字节发给了函数（而不是预签名直传）。
-  // 大文件在这里之前就会被平台按请求体上限拦成 500，所以这行日志是判断
-  // 「客户端到底用了哪个 url」的关键证据。
-  console.log('[send-upload] hit function', {
-    id,
-    contentLength: c.req.header('content-length') ?? null,
-    contentType: (c.req.header('content-type') ?? '').slice(0, 60) || null,
-    auth: c.req.header('authorization') ? 'present' : 'absent',
-    token: new URL(c.req.url).search ? 'yes' : 'no',
-  });
 
   // EdgeOne 对单次请求体有硬上限（实测 6MB 可以、7MB 直接被平台拦成 500
   // INTERNAL_CLOUD_FUNCTION_INVOCATION_FAILED）。提前用 Content-Length 拦掉，
