@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>登录页 DOM 抓取</title>
+    <style>
+      body { font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+             margin: 16px; color: #1f2328; line-height: 1.5; }
+      h1 { font-size: 17px; margin: 0 0 8px; }
+      p { font-size: 13px; color: #57606a; margin: 0 0 12px; }
+      pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 12px;
+            font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+      iframe { width: 1px; height: 1px; opacity: 0.01; border: 0; position: absolute; left: -9999px; }
+      button { padding: 8px 14px; font-size: 14px; border-radius: 6px; border: 1px solid #1f883d;
+               background: #1f883d; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <h1>登录页 DOM 抓取</h1>
+    <p>点一下按钮，它会在同源 iframe 里打开登录页、往邮箱框里填几个字符，然后把输入框周围的 HTML 打出来。</p>
+    <button id="go">开始抓取</button>
+    <pre id="out">等待…</pre>
+    <iframe id="f" src="/#/login"></iframe>
+    <script>
+      const out = document.getElementById('out');
+      const log = (s) => { out.textContent += s + '\n'; };
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      document.getElementById('go').addEventListener('click', async () => {
+        out.textContent = '';
+        const f = document.getElementById('f');
+        log('等待 iframe 加载…');
+        await sleep(2500);
+        let doc;
+        try { doc = f.contentDocument; } catch (e) { return log('❌ 跨域，读不到 DOM: ' + e.message); }
+        if (!doc) return log('❌ 拿不到 contentDocument');
+
+        const inputs = [...doc.querySelectorAll('input')];
+        log('页面里的 input 数量: ' + inputs.length);
+        inputs.forEach((el, i) => {
+          log(`  [${i}] type=${el.type} name=${el.name || '-'} id=${el.id || '-'} class=${el.className || '-'} placeholder=${el.placeholder || '-'} hidden=${el.hidden}`);
+        });
+
+        const email = inputs.find((el) => el.type === 'text' || el.type === 'email');
+        if (!email) return log('❌ 没找到文本框');
+        log('\n往邮箱框写入 "abcdef" …');
+        const setter = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, 'value').set;
+        setter.call(email, 'abcdef');
+        email.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true }));
+        email.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
+        await sleep(600);
+
+        const box = email.closest('bit-form-field') || email.parentElement;
+        log('\n===== 输入框所在容器的 HTML =====');
+        log(box.outerHTML.slice(0, 4000));
+        log('\n===== 容器父级的文本内容 =====');
+        const parentText = (box.parentElement?.innerText ?? '').replace(/\n{2,}/g, '\n');
+        log(parentText.slice(0, 800));
+      });
+    </script>
+  </body>
+</html>
