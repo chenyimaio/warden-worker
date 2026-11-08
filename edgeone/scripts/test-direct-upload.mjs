@@ -121,6 +121,14 @@ r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   body: { fileName: '2.enc', fileSize: 9 * 1024 * 1024, key: '2.k' },
 });
 check('附件直传返回 Blob 地址', r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/'), r.data);
+check('附件返回 fileUploadType=0', r.data.fileUploadType === 0, r.data.fileUploadType);
+check(
+  '附件返回 cipherResponse 且带刚建的附件',
+  r.data.cipherResponse?.id === cipherId &&
+    Array.isArray(r.data.cipherResponse?.attachments) &&
+    r.data.cipherResponse.attachments.length >= 1,
+  r.data.cipherResponse,
+);
 
 r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,

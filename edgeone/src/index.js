@@ -1435,9 +1435,21 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
     declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log('[attachment] create', { id, size: declaredSize, direct: Boolean(direct) });
 
+  // 安卓客户端的 AttachmentJsonResponse.Success 强制要求 fileUploadType 和
+  // cipherResponse 两个字段（缺任何一个就抛 MissingFieldException），
+  // 而且它会把 cipherResponse 直接渲染出来 —— 所以这里要把刚建的附件一并放进 cipher。
+  const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
+  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
+  const touched = await mutate(store, keys.cipher(a.claims.sub, cipherId), (cur) =>
+    cur ? { ...cur, updatedAt: nowIso() } : undefined,
+  );
+
   return c.json({
     attachmentId: id,
     url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
+    // 0 = Azure 语义（客户端 PUT 到 url）；1 = Direct（客户端 POST 到 url）
+    fileUploadType: direct ? 0 : 1,
+    cipherResponse: cipherToJson(touched ?? cipher, attachments),
   });
 });
 

@@ -16255,9 +16255,19 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   const direct = declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log("[attachment] create", { id, size: declaredSize, direct: Boolean(direct) });
+  const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
+  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
+  const touched = await mutate(
+    store,
+    keys.cipher(a.claims.sub, cipherId),
+    (cur) => cur ? { ...cur, updatedAt: nowIso() } : void 0
+  );
   return c.json({
     attachmentId: id,
-    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`
+    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
+    // 0 = Azure 语义（客户端 PUT 到 url）；1 = Direct（客户端 POST 到 url）
+    fileUploadType: direct ? 0 : 1,
+    cipherResponse: cipherToJson(touched ?? cipher, attachments)
   });
 });
 var BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
