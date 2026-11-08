@@ -26,12 +26,7 @@ import {
   verifyAttachmentToken,
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
-import {
-  findEnvAccount,
-  envAccountKdf,
-  hasEnvAccounts,
-  verifyEnvAccount,
-} from './env-accounts.js';
+import { sendPasswordHint, mailConfigured } from './mail.js';
 import { readUpload } from './upload.js';
 
 const app = new Hono();
@@ -328,22 +323,9 @@ app.get('/api/web-status', (c) =>
 // ---------------------------------------------------------------- accounts
 const prelogin = async (c) => {
   const { email } = await body(c);
-  // 环境变量里的账号：KDF 参数由服务端固定给出，客户端据此推导 masterPasswordHash
-  const envAcc = email ? findEnvAccount(c.env, email) : null;
-  if (envAcc) {
-    const { kdf, kdfIterations } = envAccountKdf(c.env);
-    return c.json({
-      kdf,
-      kdfIterations,
-      kdfMemory: null,
-      kdfParallelism: null,
-      kdfSettings: { kdfType: kdf, iterations: kdfIterations, memory: null, parallelism: null },
-      salt: null,
-    });
-  }
   const user = email ? await findUserByEmail(c, email) : null;
   const kdf = user?.kdfType ?? 0;
-  const iterations = user?.kdfIterations ?? 600000;
+  const iterations = user?.kdfIterations ?? Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
   return c.json({
     kdf,
     kdfIterations: iterations,
@@ -365,12 +347,7 @@ async function register(c) {
   const rl = await limit(c, 'register', requestIp(c), 10, 60);
   if (rl) return rl;
   if (!email) return c.json({ error: 'invalid email' }, 400);
-  // 配了 USEREMAILn 就只允许名单内的邮箱注册；没配则退回 ALLOWED_EMAILS
-  if (hasEnvAccounts(c.env)) {
-    if (!findEnvAccount(c.env, email)) return c.json({ error: 'Not allowed to signup' }, 401);
-  } else if (!allowedEmail(c, email)) {
-    return c.json({ error: 'Not allowed to signup' }, 401);
-  }
+  if (!allowedEmail(c, email)) return c.json({ error: 'Not allowed to signup' }, 401);
 
   const store = getStore(c.env);
   if (await findUserByEmail(c, email)) return c.json({ error: 'email already exists' }, 400);
@@ -423,14 +400,24 @@ app.post('/identity/accounts/register', register);
 app.post('/identity/accounts/register/finish', register);
 app.post('/identity/accounts/register/send-verification-email', (c) => c.json('fixed-token-to-mock'));
 
-// 主密码提示：邮件通知已移除（主密码由环境变量管理，提示没有意义）。
-// 保留路由与限流，避免客户端拿到 404 后反复重试。
+// 主密码提示：配了 SMTP_HOST + MAIL_FROM 才真的发信，否则只记一行日志并返回 200。
+// 恒定返回 200、且不透露提示内容，避免被用来探测邮箱是否存在。
 app.post('/api/accounts/password-hint', async (c) => {
   const { email } = await body(c);
   const rlEmail = email ? await limit(c, 'hint-email', String(email).toLowerCase(), 3, 60) : null;
   if (rlEmail) return rlEmail;
   const rlIp = await limit(c, 'hint-ip', requestIp(c), 10, 60);
   if (rlIp) return rlIp;
+  try {
+    const user = email ? await findUserByEmail(c, email) : null;
+    const hint = (readHint(user) ?? '').trim();
+    if (user && hint) {
+      const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
+      await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
+    }
+  } catch (e) {
+    console.error('[hint] send failed', e?.message || e);
+  }
   return c.json({});
 });
 
@@ -1073,16 +1060,10 @@ const putTwoFactor = async (store, uid, atype, data) =>
 const delTwoFactor = async (store, uid, atype) => store.del(keys.twofactor(uid, atype));
 
 /**
- * 校验用户提交的 masterPasswordHash。
- *  - 邮箱在环境变量账号里：用 USERPASSWORDn 的明文推导后比对（明文不出网、不落库）
- *  - 否则：回退到库里的 masterPasswordHash（兼容老账号）
+ * 校验用户提交的 masterPasswordHash（对库里的「二次哈希」再算一遍）。
+ * 服务端始终不知道主密码，只见到客户端派生的 mph。
  */
 async function checkMasterPassword(c, user, providedHash) {
-  const envAcc = user?.email ? findEnvAccount(c.env, user.email) : null;
-  if (envAcc) {
-    const { kdfIterations } = envAccountKdf(c.env);
-    return verifyEnvAccount(envAcc, providedHash, kdfIterations);
-  }
   if (!user?.masterPasswordHash) return false;
   return verifyPassword(user.masterPasswordHash, user.passwordSalt, user.passwordIterations, providedHash);
 }
@@ -2677,4 +2658,5 @@ exported.get('/index.html', (c) => c.redirect('/vault/', 302));
 exported.route('/vault', app);
 exported.route('/', app);
 
+export { mailConfigured };
 export default exported;
