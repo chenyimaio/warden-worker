@@ -2734,7 +2734,7 @@ function missingWebVaultPage(c) {
 </style></head><body>
 <h1>网页版（Web Vault）没有构建出来</h1>
 <p>后端是正常的 —— 你现在看到的这个页面，就是函数在响应请求。缺的是构建期应当下载到
-<code>public/vault/</code> 的官方网页版静态文件。</p>
+<code>public/</code> 的官方网页版静态文件。</p>
 <div class="warn">这不是环境变量写错的问题：<code>WEB_VAULT_ENABLED=true</code> 只决定「构建时要不要下载」，下载失败时不会有运行时开关能补救。</div>
 <p><b>按顺序检查：</b></p>
 <ol>
@@ -2787,11 +2787,13 @@ exported.use('*', cors());
 // 落地页（public/index.html）已删除：根路径直接跳到网页版。
 // 这两条必须注册在下面两个 route() 之前，否则会被 app 里的 all('*') 兜底先命中；
 // 另外它们只挂在 exported 上，不会随 /vault 前缀再挂一次（否则 /vault/ 会自己跳自己）。
-exported.get('/', (c) => c.redirect('/vault/index.html', 302));
-exported.get('/index.html', (c) => c.redirect('/vault/index.html', 302));
-// 平台静态层不对子目录做 index 解析：/vault 与 /vault/ 都会 404，
-// 所以这两个入口也直接指向文件（带 hash 的 Send 链接会保留 fragment）。
-exported.get('/vault', (c) => c.redirect('/vault/index.html', 302));
+// 网页版直接构建在站点根（public/index.html），静态层会先命中，走不到这里。
+// 走到这里只可能是「产物里没有 index.html」——给说明页，而不是让平台返回 404。
+exported.get('/', (c) => missingWebVaultPage(c));
+exported.get('/index.html', (c) => missingWebVaultPage(c));
+// 旧书签兼容：/vault 与 /vault/index.html 指回根路径（浏览器会保留 #hash）
+exported.get('/vault', (c) => c.redirect('/', 302));
+exported.get('/vault/index.html', (c) => c.redirect('/', 302));
 // 先挂 /vault：app 里有一条 all('*') 兜底，若先挂根路径会把它也挂到最前面，
 // 导致 /vault/api/config 先被兜底命中（501）。
 exported.route('/vault', app);

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // scripts/fetch-web-vault.mjs
-// 部署构建时把官方 Web Vault（Vaultwarden 维护的 bw_web_builds）下载并解压到 public/vault/。
+// 部署构建时把官方 Web Vault（Vaultwarden 维护的 bw_web_builds）下载并解压到 public/（站点根）。
+// 放在根目录而不是 public/vault/：EdgeOne 的静态层不对子目录做 index 解析，
+// 放根目录时 / 天然就是入口，不需要任何重定向。
 //
 // 为什么构建时下载而不是入库：整包 ~40 MB（解压后更大），提交进 Git 会让仓库和每次部署都变重。
 //
@@ -8,7 +10,7 @@
 //   WEB_VAULT_ENABLED  = "false" 时跳过（不下载，站点只有落地页）
 //   WEB_VAULT_VERSION  指定版本，默认 v2026.10.1
 //   WEB_VAULT_BASE_URL 下载源前缀（默认 GitHub Release；国内构建慢/不通时可换镜像）
-//   OUT_DIR            输出目录，默认 <repo>/edgeone/public/vault（测试时可覆盖）
+//   OUT_DIR            输出目录，默认 <repo>/edgeone/public（站点根，测试时可覆盖）
 //   VAULT_MAX_FILE_MB  单个文件上限（默认 20），超过的文件会被删掉
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
@@ -24,7 +26,7 @@ import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const VERSION = process.env.WEB_VAULT_VERSION || 'v2026.10.1';
-const OUT_DIR = process.env.OUT_DIR || resolve(here, '../public/vault');
+const OUT_DIR = process.env.OUT_DIR || resolve(here, '../public');
 const MAX_FILE_MB = Number(process.env.VAULT_MAX_FILE_MB || 20);
 const enabled = String(process.env.WEB_VAULT_ENABLED ?? 'true').toLowerCase() !== 'false';
 

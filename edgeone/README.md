@@ -113,7 +113,7 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WEB_VAULT_ENABLED` | `true` | `true`：构建时下载官方 Web Vault 到 `/vault/`，根路径 302 过去；`false`：不下载（构建更快、产物更小），但根路径会 404 |
+| `WEB_VAULT_ENABLED` | `true` | `true`：构建时把官方 Web Vault 下载到**站点根**，直接访问 `/` 即可；`false`：不下载（构建更快、产物更小），根路径会显示一段说明 |
 | `WEB_VAULT_VERSION` | `v2026.10.1` | 固定网页版版本号 |
 | `WEB_VAULT_BASE_URL` | GitHub 官方 release | 换下载源（国内构建机拉 GitHub 慢时用镜像） |
 

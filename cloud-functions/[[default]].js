@@ -17349,7 +17349,7 @@ function missingWebVaultPage(c) {
 </style></head><body>
 <h1>\u7F51\u9875\u7248\uFF08Web Vault\uFF09\u6CA1\u6709\u6784\u5EFA\u51FA\u6765</h1>
 <p>\u540E\u7AEF\u662F\u6B63\u5E38\u7684 \u2014\u2014 \u4F60\u73B0\u5728\u770B\u5230\u7684\u8FD9\u4E2A\u9875\u9762\uFF0C\u5C31\u662F\u51FD\u6570\u5728\u54CD\u5E94\u8BF7\u6C42\u3002\u7F3A\u7684\u662F\u6784\u5EFA\u671F\u5E94\u5F53\u4E0B\u8F7D\u5230
-<code>public/vault/</code> \u7684\u5B98\u65B9\u7F51\u9875\u7248\u9759\u6001\u6587\u4EF6\u3002</p>
+<code>public/</code> \u7684\u5B98\u65B9\u7F51\u9875\u7248\u9759\u6001\u6587\u4EF6\u3002</p>
 <div class="warn">\u8FD9\u4E0D\u662F\u73AF\u5883\u53D8\u91CF\u5199\u9519\u7684\u95EE\u9898\uFF1A<code>WEB_VAULT_ENABLED=true</code> \u53EA\u51B3\u5B9A\u300C\u6784\u5EFA\u65F6\u8981\u4E0D\u8981\u4E0B\u8F7D\u300D\uFF0C\u4E0B\u8F7D\u5931\u8D25\u65F6\u4E0D\u4F1A\u6709\u8FD0\u884C\u65F6\u5F00\u5173\u80FD\u8865\u6551\u3002</div>
 <p><b>\u6309\u987A\u5E8F\u68C0\u67E5\uFF1A</b></p>
 <ol>
@@ -17386,9 +17386,10 @@ app.all("*", (c) => {
 });
 var exported = new Hono3();
 exported.use("*", cors());
-exported.get("/", (c) => c.redirect("/vault/index.html", 302));
-exported.get("/index.html", (c) => c.redirect("/vault/index.html", 302));
-exported.get("/vault", (c) => c.redirect("/vault/index.html", 302));
+exported.get("/", (c) => missingWebVaultPage(c));
+exported.get("/index.html", (c) => missingWebVaultPage(c));
+exported.get("/vault", (c) => c.redirect("/", 302));
+exported.get("/vault/index.html", (c) => c.redirect("/", 302));
 exported.route("/vault", app);
 exported.route("/", app);
 var index_default = exported;
