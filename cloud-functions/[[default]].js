@@ -15362,7 +15362,15 @@ app.post("/api/accounts/password-hint", async (c) => {
   try {
     const user = email ? await findUserByEmail(c, email) : null;
     const hint = (readHint(user) ?? "").trim();
-    if (user && hint) {
+    if (!user) {
+      console.warn("[hint] no such user", String(email ?? "").toLowerCase());
+    } else if (!hint) {
+      console.warn("[hint] no hint stored", {
+        userId: user.id,
+        hasEncryptedHint: Boolean(user.masterPasswordHintEnc),
+        hintFields: Object.keys(user).filter((k) => k.toLowerCase().includes("hint"))
+      });
+    } else {
       const base = String(envGet(c, "BASE_URL", new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
     }

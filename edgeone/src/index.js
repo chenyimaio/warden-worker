@@ -414,7 +414,17 @@ app.post('/api/accounts/password-hint', async (c) => {
   try {
     const user = email ? await findUserByEmail(c, email) : null;
     const hint = (readHint(user) ?? '').trim();
-    if (user && hint) {
+    if (!user) {
+      console.warn('[hint] no such user', String(email ?? '').toLowerCase());
+    } else if (!hint) {
+      // 常见原因：账号是「提示加密存」时代建的，只有 masterPasswordHintEnc，
+      // 明文字段为空 → 这里读不到提示，于是什么都不发（接口仍然返回 200）。
+      console.warn('[hint] no hint stored', {
+        userId: user.id,
+        hasEncryptedHint: Boolean(user.masterPasswordHintEnc),
+        hintFields: Object.keys(user).filter((k) => k.toLowerCase().includes('hint')),
+      });
+    } else {
       const base = String(envGet(c, 'BASE_URL', new URL(c.req.url).origin));
       await sendPasswordHint(c.env, { to: user.email, hint, baseUrl: base });
     }
