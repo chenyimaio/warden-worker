@@ -15536,11 +15536,15 @@ app.post("/identity/connect/token", async (c) => {
         400
       );
     }
-    await mutate(
-      store2,
-      keys.send(send.userId, send.id),
-      (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
-    );
+    try {
+      await mutate(
+        store2,
+        keys.send(send.userId, send.id),
+        (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
+      );
+    } catch (e) {
+      console.warn("[send-access] accessCount update failed (ignored)", e?.message || e);
+    }
     const accessToken = await signAccess(c.env, {
       sub: "send-access",
       sid: accessIdFromUuid(send.id),
@@ -16658,11 +16662,15 @@ app.post("/api/sends/access/:accessId", async (c) => {
   if (sendHasPassword(send) && !checkSendPassword(send, password)) {
     return c.json({ error: password ? "Invalid password" : "Password required" }, 401);
   }
-  await mutate(
-    store,
-    keys.send(send.userId, send.id),
-    (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
-  );
+  try {
+    await mutate(
+      store,
+      keys.send(send.userId, send.id),
+      (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
+    );
+  } catch (e) {
+    console.warn("[send-access] accessCount update failed (ignored)", e?.message || e);
+  }
   return c.json(sendAccessJson(send));
 });
 app.post("/api/sends/access", async (c) => {

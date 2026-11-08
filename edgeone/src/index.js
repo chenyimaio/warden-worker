@@ -607,9 +607,15 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
         400,
       );
     }
-    await mutate(store, keys.send(send.userId, send.id), (cur) =>
-      cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
-    );
+    // 访问计数是「尽力而为」：乐观锁冲突重试耗尽会抛异常，
+    // 以前这里没人捕获 → 整条请求 500（页面就显示"发生意外错误"）。
+    try {
+      await mutate(store, keys.send(send.userId, send.id), (cur) =>
+        cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
+      );
+    } catch (e) {
+      console.warn('[send-access] accessCount update failed (ignored)', e?.message || e);
+    }
     const accessToken = await signAccess(c.env, {
       sub: 'send-access',
       sid: accessIdFromUuid(send.id),
@@ -1894,9 +1900,13 @@ app.post('/api/sends/access/:accessId', async (c) => {
     return c.json({ error: password ? 'Invalid password' : 'Password required' }, 401);
   }
 
-  await mutate(store, keys.send(send.userId, send.id), (cur) =>
-    cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
-  );
+  try {
+    await mutate(store, keys.send(send.userId, send.id), (cur) =>
+      cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
+    );
+  } catch (e) {
+    console.warn('[send-access] accessCount update failed (ignored)', e?.message || e);
+  }
   return c.json(sendAccessJson(send));
 });
 
