@@ -15083,7 +15083,7 @@ async function limit(c, kind, id, max, windowSec) {
   await store.put(key, { start: sameWindow ? cur.start : now, count: count + 1 });
   return null;
 }
-var HINT_KEYS = ["masterPasswordHint", "masterPasswordHintB64", ""];
+var HINT_KEYS = ["masterPasswordHint", "hint", "masterPasswordHintB64", ""];
 function readHint(p) {
   for (const k of HINT_KEYS) {
     if (p && Object.prototype.hasOwnProperty.call(p, k)) {

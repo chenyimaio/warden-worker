@@ -100,7 +100,11 @@ async function limit(c, kind, id, max, windowSec) {
 
 // 主密码提示的取值：不同客户端/版本用过的字段名不止一个，
 // 个别情况下还会把值塞进空字符串键（历史数据兼容），统一在这里收口。
-const HINT_KEYS = ['masterPasswordHint', 'masterPasswordHintB64', ''];
+// 提示字段名有三代写法：
+//   masterPasswordHint  注册接口（RegisterRequest）
+//   hint                改主密码接口（PasswordRequest）—— 漏了它会导致"改了提示但没保存"
+//   masterPasswordHintB64 / ''  历史兼容
+const HINT_KEYS = ['masterPasswordHint', 'hint', 'masterPasswordHintB64', ''];
 function readHint(p) {
   for (const k of HINT_KEYS) {
     if (p && Object.prototype.hasOwnProperty.call(p, k)) {
