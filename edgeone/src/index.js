@@ -426,6 +426,7 @@ app.post('/api/accounts/password-hint', async (c) => {
 
 // ---------------------------------------------------------------- identity
 app.post('/identity/connect/token', async (c) => {
+  const tStart = Date.now();
   const p = await body(c);
   const grant = String(p.grant_type ?? '');
   const store = getStore(c.env);
@@ -437,7 +438,9 @@ app.post('/identity/connect/token', async (c) => {
     if (rlEmail) return rlEmail;
     const rlIp = await limit(c, 'login-ip', requestIp(c), 60, 60);
     if (rlIp) return rlIp;
+    const tLookup = Date.now();
     const user = await findUserByEmail(c, email);
+    console.log('[token] timings', { rateLimit: tLookup - tStart, lookup: Date.now() - tLookup });
     if (!user) return c.json({ error: 'invalid_grant' }, 400);
 
     // login with deviceassword  access code
@@ -1996,6 +1999,7 @@ app.get('/api/sends/access/file/:fileId/data', async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: 'file not found' }, 404);
+  console.log('[send-file] download', { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
   return c.body(bytes, 200, {
     'content-type': 'application/octet-stream',
     'content-length': String(bytes.length),
@@ -2244,6 +2248,7 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
 
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: 'file not found' }, 404);
+  console.log('[send-file] download', { sendId: send.id, bytes: bytes.length, declared: send.data?.size ?? null });
   return c.body(bytes, 200, {
     'content-type': 'application/octet-stream',
     'content-length': String(bytes.length),
