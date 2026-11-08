@@ -15,7 +15,7 @@
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
 // 落地页会探测 /vault/index.html，构建失败时不会把用户重定向到空目录。
-import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
@@ -147,6 +147,17 @@ async function main() {
   if (!existsSync(join(OUT_DIR, 'index.html'))) {
     throw new Error('产物里没有 index.html，站点根选错了');
   }
+
+  // 上游 index.html 里有一条历史遗留的 <link rel="stylesheet" href="css/vaultwarden.css">，
+  // 但包内并没有这个文件。请求会落到函数兜底返回 501，每次加载页面都在控制台留一条错误。
+  // 补一个空文件即可（真正的样式在 styles.<hash>.css 里）。
+  const indexHtml = readFileSync(join(OUT_DIR, 'index.html'), 'utf8');
+  if (indexHtml.includes('css/vaultwarden.css') && !existsSync(join(OUT_DIR, 'css/vaultwarden.css'))) {
+    mkdirSync(join(OUT_DIR, 'css'), { recursive: true });
+    writeFileSync(join(OUT_DIR, 'css/vaultwarden.css'), '/* placeholder: upstream index.html links this file but does not ship it */\n');
+    log('补齐缺失的 css/vaultwarden.css（避免每次加载都 501）');
+  }
+
   log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);
 }
 
