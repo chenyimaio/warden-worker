@@ -16631,7 +16631,14 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: "file not found" }, 404);
+  if (!bytes) {
+    console.warn("[send-access] file bytes missing", {
+      sendId: send.id,
+      declaredSize: send.data?.size ?? null,
+      createdAt: send.createdAt ?? null
+    });
+    return c.json({ error: "file not found", reason: "upload_incomplete" }, 404);
+  }
   const downloadToken = await signAccess(c.env, {
     sub: "send-access",
     sid: accessIdFromUuid(send.id),

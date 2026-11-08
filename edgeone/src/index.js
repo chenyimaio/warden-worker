@@ -1889,7 +1889,16 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
-  if (!bytes) return c.json({ error: 'file not found' }, 404);
+  if (!bytes) {
+    // 典型场景：创建 Send 成功，但客户端上传那一步失败（平台 500 / 直传 URL 用错），
+    // 于是记录在、字节不在。网页版会显示「找不到与此 Send 关联的文件」。
+    console.warn('[send-access] file bytes missing', {
+      sendId: send.id,
+      declaredSize: send.data?.size ?? null,
+      createdAt: send.createdAt ?? null,
+    });
+    return c.json({ error: 'file not found', reason: 'upload_incomplete' }, 404);
+  }
 
   // 网页版（Vaultwarden 2026.x）拿到的是 JSON，然后自己 fetch(url)：
   //   const t = await sendApiService.getSendFileDownloadData(send, token);
