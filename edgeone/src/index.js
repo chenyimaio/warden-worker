@@ -2125,6 +2125,20 @@ async function uploadSendFile(c) {
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
+  // 防截断：创建 Send 时客户端已经报过大小，收到的字节明显更少就是传输被截断了。
+  // 直接拒绝比存一个坏文件好（否则用户下载到的文件打不开，还以为是加密问题）。
+  const declaredSize = Number(send.data?.size ?? 0) || 0;
+  if (declaredSize && bytes.length + 1024 < declaredSize) {
+    console.warn('[send-upload] size mismatch', { declaredSize, received: bytes.length });
+    return c.json(
+      {
+        error: `upload incomplete: received ${bytes.length} of ${declaredSize} bytes`,
+        received: bytes.length,
+        declared: declaredSize,
+      },
+      400,
+    );
+  }
   if (maxBytes && bytes.length > maxBytes) {
     return c.json({ error: `File too large: ${(maxBytes / 1024 / 1024).toFixed(1)} MB max`, limit: maxBytes }, 413);
   }

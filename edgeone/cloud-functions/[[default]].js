@@ -14941,32 +14941,46 @@ var LF = 10;
 var DASH = 45;
 async function readUpload(c) {
   const ct = c.req.header("content-type") || "";
+  const declared = Number(c.req.header("content-length") || 0);
   const raw2 = Buffer.from(await c.req.arrayBuffer());
+  if (declared && raw2.length < declared) {
+    console.warn("[upload] truncated", { declared, received: raw2.length, contentType: ct });
+    return { error: `upload truncated: received ${raw2.length} of ${declared} bytes` };
+  }
   const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ct);
   if (!ct.toLowerCase().includes("multipart/form-data") || !m) {
     return { bytes: raw2, fields: {} };
   }
   const boundary = (m[1] ?? m[2]).trim();
   const delim = Buffer.from(`--${boundary}`);
+  const first = raw2.indexOf(delim);
+  if (first === -1) {
+    console.warn("[upload] multipart declared but no boundary found, treating body as raw bytes", {
+      contentType: ct,
+      length: raw2.length
+    });
+    return { bytes: raw2, fields: {} };
+  }
   const fields = {};
-  let pos = raw2.indexOf(delim);
+  let pos = first;
   let fileBytes = null;
   let fileName = null;
+  let sawClosing = false;
   while (pos !== -1) {
     let start = pos + delim.length;
-    if (raw2[start] === DASH && raw2[start + 1] === DASH) break;
+    if (raw2[start] === DASH && raw2[start + 1] === DASH) {
+      sawClosing = true;
+      break;
+    }
     if (raw2[start] === CR && raw2[start + 1] === LF) start += 2;
     const headEnd = raw2.indexOf("\r\n\r\n", start);
     if (headEnd === -1) break;
     const headers = raw2.subarray(start, headEnd).toString("utf8");
     const bodyStart = headEnd + 4;
     const next = raw2.indexOf(delim, bodyStart);
-    if (next === -1) break;
-    let bodyEnd = next;
-    if (bodyEnd - 2 >= bodyStart && raw2[bodyEnd - 2] === CR && raw2[bodyEnd - 1] === LF) {
-      bodyEnd -= 2;
-    }
-    const bytes = raw2.subarray(bodyStart, bodyEnd);
+    const isLast = next === -1;
+    const bodyEnd = isLast ? raw2.length : raw2[next - 2] === CR && raw2[next - 1] === LF ? next - 2 : next;
+    const bytes = raw2.subarray(bodyStart, Math.max(bodyStart, bodyEnd));
     const name = /name="([^"]*)"/i.exec(headers)?.[1];
     const filename = /filename="([^"]*)"/i.exec(headers)?.[1];
     if (filename !== void 0) {
@@ -14977,6 +14991,7 @@ async function readUpload(c) {
     } else if (name) {
       fields[name] = bytes.toString("utf8");
     }
+    if (isLast) break;
     pos = next;
   }
   if (fileBytes === null) {
@@ -14984,11 +14999,18 @@ async function readUpload(c) {
       "[upload] no file part",
       JSON.stringify({
         contentType: ct,
+        declared,
         length: raw2.length,
-        head: raw2.subarray(0, 64).toString("latin1")
+        boundary,
+        sawClosing,
+        head: raw2.subarray(0, 64).toString("latin1"),
+        tail: raw2.subarray(Math.max(0, raw2.length - 64)).toString("latin1")
       })
     );
     return { error: "no file part" };
+  }
+  if (!sawClosing && !declared) {
+    console.warn("[upload] missing closing boundary", { length: raw2.length, boundary });
   }
   return { bytes: fileBytes, fields, fileName };
 }
@@ -16808,6 +16830,18 @@ async function uploadSendFile(c) {
     return c.json({ error: up.error }, 400);
   }
   const bytes = up.bytes;
+  const declaredSize = Number(send.data?.size ?? 0) || 0;
+  if (declaredSize && bytes.length + 1024 < declaredSize) {
+    console.warn("[send-upload] size mismatch", { declaredSize, received: bytes.length });
+    return c.json(
+      {
+        error: `upload incomplete: received ${bytes.length} of ${declaredSize} bytes`,
+        received: bytes.length,
+        declared: declaredSize
+      },
+      400
+    );
+  }
   if (maxBytes && bytes.length > maxBytes) {
     return c.json({ error: `File too large: ${(maxBytes / 1024 / 1024).toFixed(1)} MB max`, limit: maxBytes }, 413);
   }

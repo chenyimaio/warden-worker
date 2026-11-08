@@ -97,5 +97,42 @@ const join = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? 
   check('缺少 file part：返回 no file part', up.error === 'no file part', up);
 }
 
+// ---------------------------------------------------------------- 4. 请求体被截断
+{
+  const boundary = 'abc';
+  const body = join(`--${boundary}\r\n`, 'Content-Disposition: form-data; name="f"; filename="a.bin"\r\n\r\n', 'x');
+  const ctx = {
+    req: {
+      header: (n) => {
+        const k = String(n).toLowerCase();
+        if (k === 'content-type') return `multipart/form-data; boundary=${boundary}`;
+        if (k === 'content-length') return '9999';
+        return undefined;
+      },
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+    },
+  };
+  const up = await readUpload(ctx);
+  check('请求体被截断：明确报 truncated', typeof up.error === 'string' && up.error.includes('truncated'), up);
+}
+
+// ---------------------------------------------------------------- 5. 声明 multipart 但无 boundary
+{
+  const body = Buffer.from('just-raw-bytes-no-delimiter');
+  const up = await readUpload(req('multipart/form-data; boundary=zzz', body));
+  check('声明 multipart 但无分隔符：按裸字节处理', up.bytes?.equals(body), up);
+}
+
+// ---------------------------------------------------------------- 6. 最后一个 part 缺结尾分隔符
+{
+  const boundary = 'abc';
+  const body = join(
+    `--${boundary}\r\n`,
+    'Content-Disposition: form-data; name="f"; filename="a.bin"\r\n\r\n',
+    'TAILDATA',
+  );
+  const up = await readUpload(req(`multipart/form-data; boundary=${boundary}`, body));
+  check('缺结尾分隔符：仍能取出文件', up.bytes?.toString() === 'TAILDATA', up);
+}
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
