@@ -1,128 +1,129 @@
-# Warden: A Bitwarden-compatible server for Cloudflare Workers
+# Warden：面向 Cloudflare Workers 的 Bitwarden 兼容服务端
 
-This project provides a self-hosted, Bitwarden-compatible server that can be deployed to Cloudflare Workers for free. It's designed to be low-maintenance, allowing you to "deploy and forget" without worrying about server management or recurring costs.
+本项目提供一个可自托管、与 Bitwarden 客户端兼容的服务端，可免费部署到 Cloudflare Workers。
+设计目标是**低维护**：部署一次就不用再管，不需要维护服务器，也没有持续费用。
 
 > ### EdgeOne Makers 移植版（Node.js）
 >
 > 本仓库的 [`edgeone/`](edgeone/) 目录是把后端重写到 **腾讯云 EdgeOne Makers（国内站）** 的版本：
-> Cloud Functions (Node.js) + Makers Blob 存储 + 项目内直连 SMTP。
+> Cloud Functions (Node.js) + Makers Blob 存储 + 可选的项目内直连 SMTP。
 >
 > 文档：[edgeone/README.md](edgeone/README.md) · 部署手册：[edgeone/docs/DEPLOY.md](edgeone/docs/DEPLOY.md)
 >
 > [![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)
 >
-> 图片没显示时：
-> [国内站一键部署](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)（`console.cloud.tencent.com`）·
-> [国际站一键部署](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)（`edgeone.ai`）
+> 图片没显示时：[国内站一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE) · [国际站一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)
 >
-> 两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、13 个环境变量名。输出目录留空。
+> 两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、6 个环境变量名。输出目录留空。
 
-## Why another Bitwarden server?
+## 为什么还要做一个 Bitwarden 服务端？
 
-While projects like [Vaultwarden](https://github.com/dani-garcia/vaultwarden) provide excellent self-hosted solutions, they still require you to manage a server or VPS. This can be a hassle, and if you forget to pay for your server, you could lose access to your passwords.
+像 Vaultwarden 这样的项目已经提供了很好的自托管方案，但它们仍然需要你维护一台服务器或 VPS。
+这很麻烦，而且一旦忘记续费，你可能就失去了对所有密码的访问。
 
-Warden aims to solve this problem by leveraging the Cloudflare Workers ecosystem. By deploying Warden to a Cloudflare Worker and using Cloudflare D1 for storage, you can have a completely free, serverless, and low-maintenance Bitwarden server.
+Warden 想用 Cloudflare Workers 生态解决这个问题：把 Warden 部署到一个 Worker，用 Cloudflare D1 存数据，
+就能得到一个完全免费、无服务器、几乎不用维护的 Bitwarden 服务端。
 
-## Features
+## 功能
 
-*   **Core Vault Functionality:** All your basic vault operations are supported, including creating, reading, updating, and deleting ciphers and folders.
-*   **TOTP Support:** Store and generate Time-based One-Time Passwords for your accounts.
-*   **Bitwarden Compatible:** Works with the official Bitwarden browser extensions and Android app (iOS is untested).
-*   **Free to Host:** Runs on Cloudflare's free tier.
-*   **Low Maintenance:** Deploy it once and forget about it.
-*   **Secure:** Your data is stored in your own Cloudflare D1 database.
-*   **Easy to Deploy:** Get up and running in minutes with the Wrangler CLI.
+- **核心保险库**：条目的增删改查、文件夹管理全部支持。
+- **TOTP 支持**：保存并生成基于时间的一次性密码。
+- **Bitwarden 兼容**：可与官方 Bitwarden 浏览器扩展和 Android App 配合使用（iOS 未测试）。
+- **免费托管**：跑在 Cloudflare 免费额度内。
+- **低维护**：部署一次即可长期不管。
+- **数据自持**：数据存在你自己的 Cloudflare D1 数据库里。
+- **部署简单**：用 Wrangler CLI 几分钟就能跑起来。
 
-## Current Status
+## 当前状态
 
-**This project is not yet feature-complete.** It currently supports the core functionality of a personal vault, including TOTP. However, it does **not** support the following features:
+本项目尚未实现全部功能。目前支持个人保险库的核心能力（含 TOTP），但**不支持**：
 
-*   Sharing
-*   Bitwarden Send
-*   Organizations
-*   Other Bitwarden advanced features
+- 共享
+- Bitwarden Send
+- 组织（Organizations）
+- 其他 Bitwarden 高级功能
 
-There are no immediate plans to implement these features. The primary goal of this project is to provide a simple, free, and low-maintenance personal password manager.
+短期内没有实现这些功能的计划。本项目的目标很明确：提供一个简单、免费、低维护的个人密码管理器。
 
-## Compatibility
+## 兼容性
 
-*   **Browser Extensions:** Chrome, Firefox, Safari, etc.
-*   **Android App:** The official Bitwarden Android app.
-*   **iOS App:** Untested. If you have an iOS device, please test and report your findings!
+- **浏览器扩展**：Chrome、Firefox、Safari 等。
+- **Android App**：官方 Bitwarden Android 客户端。
+- **iOS App**：未测试。如果你有 iOS 设备，欢迎测试并反馈结果。
 
-## Getting Started
+## 快速开始
 
-### Prerequisites
+### 前置条件
 
-*   A Cloudflare account.
-*   The [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/get-started/) installed and configured.
+- 一个 Cloudflare 账号。
+- 已安装并配置好的 Wrangler CLI。
 
-### Deployment
+### 部署
 
-1.  **Clone the repository:**
+1. 克隆仓库：
 
-    ```bash
-    git clone https://github.com/your-username/warden-worker.git
-    cd warden-worker
-    ```
+```bash
+git clone https://github.com/your-username/warden-worker.git
+cd warden-worker
+```
 
-2.  **Create a D1 Database:**
+2. 创建 D1 数据库：
 
-    ```bash
-    wrangler d1 create warden-db
-    ```
+```bash
+wrangler d1 create warden-db
+```
 
-3.  **Configure your Database ID:**
+3. 配置数据库 ID：
 
-    When you create a D1 database, Wrangler will output the `database_id`. To avoid committing this secret to your repository, this project uses an environment variable to configure the database ID.
+创建 D1 数据库时，Wrangler 会输出 `database_id`。为了避免把这个值提交进仓库，本项目通过环境变量传入。
 
-    You have two options:
+有两种方式：
 
-    **Option 1: (Recommended) Use a `.env` file:**
+**方式一（推荐）：使用 `.env` 文件**
 
-    Create a file named `.env` in the root of the project and add the following line, replacing the placeholder with your actual `database_id`:
+在项目根目录新建 `.env`，填入你的 `database_id`：
 
-    ```
-    D1_DATABASE_ID="your-database-id-goes-here"
-    ```
+```
+D1_DATABASE_ID="your-database-id-goes-here"
+```
 
-    Make sure to add the `.env` file to your `.gitignore` file to prevent it from being committed to git.
+记得把 `.env` 加进 `.gitignore`，避免被提交。
 
-    **Option 2: Set an environment variable in your shell:**
+**方式二：在 shell 里设置环境变量**
 
-    You can set the environment variable in your shell before deploying:
+```bash
+export D1_DATABASE_ID="your-database-id-goes-here"
+wrangler deploy
+```
 
-    ```bash
-    export D1_DATABASE_ID="your-database-id-goes-here"
-    wrangler deploy
-    ```
+4. 部署 Worker：
 
-4.  **Deploy the worker:**
+```bash
+wrangler deploy
+```
 
-    ```bash
-    wrangler deploy
-    ```
+部署会自动建好所需的数据库表。
 
-    This will deploy the worker and set up the necessary database tables.
+5. 设置环境变量：
 
-5. **Set environment variables**
-   
-- `ALLOWED_EMAILS` your-email@example.com
-- `JWT_SECRET` a long random string
-- `JWT_REFRESH_SECRET` a long random string
+```
+ALLOWED_EMAILS=your-email@example.com
+JWT_SECRET=一段很长的随机字符串
+JWT_REFRESH_SECRET=另一段很长的随机字符串
+```
 
-6.  **Configure your Bitwarden client:**
+6. 配置 Bitwarden 客户端：
 
-    In your Bitwarden client, go to the self-hosted login screen and enter the URL of your deployed worker (e.g., `https://warden-worker.your-username.workers.dev`).
+在客户端的「自托管」登录界面，填入你部署好的 Worker 地址（例如 `https://warden-worker.your-username.workers.dev`）。
 
-## Configuration
+## 配置
 
-This project requires minimal configuration. The main configuration is done in the `wrangler.toml` file, where you specify your D1 database binding.
+本项目几乎不需要配置，主要配置项都在 `wrangler.toml` 里，用于指定 D1 数据库绑定。
 
-## Contributing
+## 参与贡献
 
-Contributions are welcome! If you find a bug, have a feature request, or want to improve the code, please open an issue or submit a pull request.
+欢迎贡献！如果发现 bug、想要新功能，或者想改进代码，欢迎提交 issue 或 pull request。
 
-## License
+## 许可证
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+本项目基于 MIT 许可证发布，详见 [LICENSE](LICENSE) 文件。

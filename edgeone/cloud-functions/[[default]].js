@@ -14747,6 +14747,10 @@ var MemoryStore = class {
   async putBinary(key, bytes) {
     this.#m.set(key, { value: Buffer.from(bytes), etag: `"bin-${Date.now()}"` });
   }
+  // 内存存储没有预签名直传（本地调试仍走函数内上传）
+  async createUploadUrl() {
+    return null;
+  }
   async getBinary(key) {
     const v = this.#m.get(key);
     return v ? Buffer.from(v.value) : null;
@@ -14772,6 +14776,16 @@ var BlobStore = class {
   async put(key, value) {
     await this.#store.setJSON(key, value);
     return { etag: null };
+  }
+  /**
+   * 预签名 PUT 地址：客户端把字节直接传到 Blob，不经过函数
+   * （因此不受平台「单次请求体约 6MB」的限制，只受 Blob 单对象上限约束）。
+   * SDK 不支持时返回 null，调用方回退到函数内上传。
+   */
+  async createUploadUrl(key, opts = {}) {
+    if (typeof this.#store.createUploadUrl !== "function") return null;
+    const res = await this.#store.createUploadUrl(key, opts);
+    return res?.url ?? null;
   }
   async del(key) {
     await this.#store.delete(key);
@@ -16196,21 +16210,46 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   const cipher = (await store.get(keys.cipher(a.claims.sub, cipherId)))?.value;
   if (!cipher) return c.json({ error: "not found" }, 404);
   const id = newId();
+  const declaredSize = Number(p.fileSize ?? 0) || 0;
   const meta = {
     id,
     cipherId,
     userId: a.claims.sub,
     fileName: String(p.fileName ?? "file"),
-    fileSize: Number(p.fileSize ?? 0) || 0,
+    fileSize: declaredSize,
     key: p.key ?? null,
     createdAt: nowIso()
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
+  const directMax = directUploadMax(c);
+  if (directMax && declaredSize > directMax) {
+    return c.json(
+      { error: `Attachment too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      413
+    );
+  }
+  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
   return c.json({
     attachmentId: id,
-    url: `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`
+    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`
   });
 });
+function directUploadEnabled(c) {
+  return String(envGet(c, "DIRECT_UPLOAD_ENABLED", "false")).toLowerCase() === "true";
+}
+function directUploadMax(c) {
+  return Number(envGet(c, "DIRECT_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)) || 0;
+}
+async function presignedUploadUrl(c, key) {
+  if (!directUploadEnabled(c)) return null;
+  try {
+    const url = await getStore2(c.env).createUploadUrl(key, { expireSeconds: 3600 });
+    return url || null;
+  } catch (e) {
+    console.warn("[upload] presigned url failed, falling back to function upload:", e?.message || e);
+    return null;
+  }
+}
 async function uploadAttachmentBytes(c) {
   const platformMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   const declared = Number(c.req.header("content-length") || 0);
@@ -16667,6 +16706,17 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
+  const directMax = directUploadMax(c);
+  if (directMax && size > directMax) {
+    return c.json(
+      { error: `File too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      413
+    );
+  }
+  const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
+  if (direct) {
+    return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
+  }
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),

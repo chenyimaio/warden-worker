@@ -92,6 +92,11 @@ export class MemoryStore {
     this.#m.set(key, { value: Buffer.from(bytes), etag: `"bin-${Date.now()}"` });
   }
 
+  // 内存存储没有预签名直传（本地调试仍走函数内上传）
+  async createUploadUrl() {
+    return null;
+  }
+
   async getBinary(key) {
     const v = this.#m.get(key);
     return v ? Buffer.from(v.value) : null;
@@ -142,6 +147,17 @@ export class BlobStore {
   async put(key, value) {
     await this.#store.setJSON(key, value);
     return { etag: null };
+  }
+
+  /**
+   * 预签名 PUT 地址：客户端把字节直接传到 Blob，不经过函数
+   * （因此不受平台「单次请求体约 6MB」的限制，只受 Blob 单对象上限约束）。
+   * SDK 不支持时返回 null，调用方回退到函数内上传。
+   */
+  async createUploadUrl(key, opts = {}) {
+    if (typeof this.#store.createUploadUrl !== 'function') return null;
+    const res = await this.#store.createUploadUrl(key, opts);
+    return res?.url ?? null;
   }
 
   async del(key) {

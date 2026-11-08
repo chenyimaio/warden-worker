@@ -1408,25 +1408,60 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   if (!cipher) return c.json({ error: 'not found' }, 404);
 
   const id = newId();
+  const declaredSize = Number(p.fileSize ?? 0) || 0;
   const meta = {
     id,
     cipherId,
     userId: a.claims.sub,
     fileName: String(p.fileName ?? 'file'),
-    fileSize: Number(p.fileSize ?? 0) || 0,
+    fileSize: declaredSize,
     key: p.key ?? null,
     createdAt: nowIso(),
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
 
+  // 优先直传：客户端把字节 PUT 到 Blob，不经过函数（上限按 DIRECT_UPLOAD_MAX_BYTES）
+  const directMax = directUploadMax(c);
+  if (directMax && declaredSize > directMax) {
+    return c.json(
+      { error: `Attachment too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      413,
+    );
+  }
+  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+
   return c.json({
     attachmentId: id,
-    url: `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
+    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
   });
 });
 
 // multipart2 /
 // readUpload 已移到 ./upload.js（手工 multipart 解析，见该文件顶部说明）
+
+// ---- 直传（预签名 URL）----
+// 打开后，创建附件/文件 Send 时返回的 url 指向 Blob 的预签名 PUT 地址，
+// 客户端把字节直接传上去，不经过函数 —— 因此不受平台「单次请求体约 6MB」限制，
+// 只受 Blob 单对象上限（默认按 25 MiB 处理）约束。
+function directUploadEnabled(c) {
+  return String(envGet(c, 'DIRECT_UPLOAD_ENABLED', 'false')).toLowerCase() === 'true';
+}
+
+function directUploadMax(c) {
+  return Number(envGet(c, 'DIRECT_UPLOAD_MAX_BYTES', 25 * 1024 * 1024)) || 0;
+}
+
+/** 生成预签名直传 URL；未启用 / SDK 不支持 / 出错时返回 null（调用方回退到函数内上传） */
+async function presignedUploadUrl(c, key) {
+  if (!directUploadEnabled(c)) return null;
+  try {
+    const url = await getStore(c.env).createUploadUrl(key, { expireSeconds: 3600 });
+    return url || null;
+  } catch (e) {
+    console.warn('[upload] presigned url failed, falling back to function upload:', e?.message || e);
+    return null;
+  }
+}
 
 async function uploadAttachmentBytes(c) {
   // 和文件 Send 一样：EdgeOne 单次请求体上限约 6MB，超了平台会直接 500。
@@ -1944,9 +1979,21 @@ app.post('/api/sends/file/v2', async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
-  // 上传地址是「预签名 URL」：客户端（Android 走的是 Azure 风格直传）会直接
-  // 把加密字节 PUT 到这个地址，不带 Authorization。所以把一次性的签名放进查询串，
-  // 服务端在 uploadSendFile 里校验它 —— 等价于 Azure SAS 的思路。
+  // 优先直传：客户端把字节直接 PUT 到 Blob（预签名 URL），不经过函数。
+  // 这样单文件上限从平台的 ~6MB 提到 Blob 单对象上限（DIRECT_UPLOAD_MAX_BYTES，默认 25 MiB）。
+  const directMax = directUploadMax(c);
+  if (directMax && size > directMax) {
+    return c.json(
+      { error: `File too large: up to ${(directMax / 1024 / 1024).toFixed(0)} MB`, limit: directMax },
+      413,
+    );
+  }
+  const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
+  if (direct) {
+    return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
+  }
+
+  // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
     sub: 'send-upload',
     sid: accessIdFromUuid(id),

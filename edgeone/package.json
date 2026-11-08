@@ -14,6 +14,7 @@
     "accept": "node scripts/acceptance.mjs",
     "parity": "node scripts/route-parity.mjs --strict",
     "test:blob": "node scripts/blob-adapter-test.mjs",
+    "test:direct": "node scripts/test-direct-upload.mjs",
     "test:repair": "node scripts/test-profile-repair.mjs",
     "doc": "node scripts/doc-check.mjs",
     "blob:selftest": "node scripts/blob-selftest.mjs"
