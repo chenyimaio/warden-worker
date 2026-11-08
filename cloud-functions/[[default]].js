@@ -16246,16 +16246,6 @@ function attachmentToResponse(meta, base, env) {
     object: "attachment"
   };
 }
-var BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
-async function presignedUploadUrl(c, key) {
-  try {
-    const url = await getStore2(c.env).createUploadUrl(key, { expireSeconds: 3600 });
-    return url || null;
-  } catch (e) {
-    console.warn("[upload] presigned url failed:", e?.message || e);
-    return null;
-  }
-}
 var baseUrlOf = (c) => String(envGet(c, "BASE_URL", new URL(c.req.url).origin)).replace(/\/+$/, "");
 async function streamBinary(c, store, key, contentType = "application/octet-stream", extraHeaders = {}) {
   let size = 0;
@@ -16295,22 +16285,16 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
   const uploadMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413
-    );
-  }
-  const direct = uploadMax && declaredSize > uploadMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
-  if (uploadMax && declaredSize > uploadMax && !direct) {
+  if (uploadMax && declaredSize > uploadMax) {
     return c.json(
       {
-        error: `Attachment too large: this deployment accepts uploads up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        error: `Attachment too large: this deployment accepts files up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
         limit: uploadMax
       },
       413
     );
   }
+  const direct = null;
   const meta = {
     id,
     cipherId,
@@ -16814,28 +16798,17 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
   const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
-  if (size > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413
-    );
-  }
   if (functionMax && size > functionMax) {
-    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-    if (direct) {
-      console.log("[send] create -> presigned (AZURE)", { id, size });
-      return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
-    }
-    console.warn("[send] create rejected, presign unavailable", { id, size, functionMax });
+    console.warn("[send] create rejected, too large", { id, size, functionMax });
     return c.json(
       {
-        error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        error: `File too large: this deployment accepts files up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
         limit: functionMax
       },
       413
     );
   }
-  console.log("[send] create -> function url (DIRECT)", { id, size, functionMax });
+  console.log("[send] create -> function url", { id, size, functionMax });
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),

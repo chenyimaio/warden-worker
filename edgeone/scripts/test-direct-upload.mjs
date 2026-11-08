@@ -94,14 +94,10 @@ check(
   r.data,
 );
 
-// 2) 文件 Send 超过函数上限 -> 预签名直传 + fileUploadType 1（AZURE）
-r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'big') });
-check(
-  '文件 Send 超过 6MiB 走直传',
-  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/') && r.data.fileUploadType === 1,
-  r.data,
-);
-check('直传 key 是 sendFile 布局', String(lastKey ?? '').includes('/sends/'), lastKey);
+// 2) 文件 Send 超过平台上限 -> 413（响应体同样受限，传上去也下不来）
+r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(9 * 1024 * 1024, 'big') });
+check('文件 Send 超过 6MiB 返回 413', r.status === 413, r);
+check('413 里说明是平台限制', String(r.data.error ?? '').includes('6.0 MB'), r.data);
 
 // 4) 附件：小附件走函数，大附件走预签名（fileUploadType 1 = AZURE）
 const cipher = await call('POST', '/api/ciphers', {
@@ -141,17 +137,7 @@ r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
   token,
   body: { fileName: 'big.enc', fileSize: 9 * 1024 * 1024, key: '2.k' },
 });
-check(
-  '大附件走预签名（fileUploadType=1）',
-  r.status === 200 && String(r.data.url).startsWith('https://blob.example.com/') && r.data.fileUploadType === 1,
-  r.data,
-);
-
-r = await call('POST', `/api/ciphers/${cipherId}/attachment/v2`, {
-  token,
-  body: { fileName: 'huge.enc', fileSize: 26 * 1024 * 1024, key: '2.k' },
-});
-check('附件超过 25MiB 返回 413', r.status === 413, r);
+check('附件超过 6MiB 返回 413', r.status === 413, r);
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exitCode = failed === 0 ? 0 : 1;

@@ -1412,18 +1412,6 @@ function attachmentToResponse(meta, base, env) {
 //   "0" = DIRECT  -> 客户端把字节 POST 给服务端（受平台请求体上限约束）
 //   "1" = AZURE   -> 客户端把字节 PUT 到我们返回的 url（真正的直传）
 // 所以小文件给 0 + 函数地址，大文件给 1 + 预签名 Blob 地址。
-const BLOB_OBJECT_MAX_BYTES = 25 * 1024 * 1024;
-
-/** 生成预签名直传 URL；SDK 不支持 / 出错时返回 null */
-async function presignedUploadUrl(c, key) {
-  try {
-    const url = await getStore(c.env).createUploadUrl(key, { expireSeconds: 3600 });
-    return url || null;
-  } catch (e) {
-    console.warn('[upload] presigned url failed:', e?.message || e);
-    return null;
-  }
-}
 
 const baseUrlOf = (c) => String(envGet(c, 'BASE_URL', new URL(c.req.url).origin)).replace(/\/+$/, '');
 
@@ -1473,31 +1461,18 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   const id = newId();
   const declaredSize = Number(p.fileSize ?? 0) || 0;
 
-  // 实测（2026.8 安卓客户端）：即使 attachment/v2 返回了预签名直传地址，
-  // 它仍然把字节 POST 给函数（日志里能看到紧接着的
-  // /api/ciphers/{id}/attachment/{aid} 请求），所以直传对附件同样无效。
-  // 统一走函数上传，并用 UPLOAD_MAX_BYTES 给出明确上限。
+  // 平台请求体和响应体都有约 6 MB 限制，附件同样不能更大（传上去也下不来）。
   const uploadMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
-  if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413,
-    );
-  }
-  // 大附件走预签名直传（fileUploadType 必须是 1 = AZURE，客户端才会 PUT 到 url）
-  const direct =
-    uploadMax && declaredSize > uploadMax
-      ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id))
-      : null;
-  if (uploadMax && declaredSize > uploadMax && !direct) {
+  if (uploadMax && declaredSize > uploadMax) {
     return c.json(
       {
-        error: `Attachment too large: this deployment accepts uploads up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        error: `Attachment too large: this deployment accepts files up to ${(uploadMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
         limit: uploadMax,
       },
       413,
     );
   }
+  const direct = null;
 
   const meta = {
     id,
@@ -2080,31 +2055,20 @@ app.post('/api/sends/file/v2', async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
-  // 大文件走直传：客户端 FileUploadType 的序列化值是反的（见 presignedUploadUrl 上方注释），
-  // 只有返回 1（AZURE）它才会真的把字节 PUT 到我们给的 url；0（DIRECT）它会 POST 给函数。
+  // 平台对**请求体和响应体**都有约 6 MB 的限制（实测 8.95 MB 的下载直接返回 413），
+  // 所以即使靠直传把大文件传上去，下载也下不来 —— 干脆在创建时就说清楚。
   const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
-  if (size > BLOB_OBJECT_MAX_BYTES) {
-    return c.json(
-      { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
-      413,
-    );
-  }
   if (functionMax && size > functionMax) {
-    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-    if (direct) {
-      console.log('[send] create -> presigned (AZURE)', { id, size });
-      return c.json({ sendResponse: sendToJson(send), fileUploadType: 1, url: direct });
-    }
-    console.warn('[send] create rejected, presign unavailable', { id, size, functionMax });
+    console.warn('[send] create rejected, too large', { id, size, functionMax });
     return c.json(
       {
-        error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request body limit)`,
+        error: `File too large: this deployment accepts files up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
         limit: functionMax,
       },
       413,
     );
   }
-  console.log('[send] create -> function url (DIRECT)', { id, size, functionMax });
+  console.log('[send] create -> function url', { id, size, functionMax });
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
