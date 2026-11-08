@@ -17426,6 +17426,10 @@ exported.use("*", cors());
 exported.get("/", (c) => missingWebVaultPage(c));
 exported.get("/index.html", (c) => missingWebVaultPage(c));
 exported.get("/vault", (c) => c.redirect("/", 302));
+exported.get("/icons/*", (c) => {
+  c.header("cache-control", "public, max-age=86400");
+  return c.body(null, 404);
+});
 exported.get("/vault/index.html", (c) => c.redirect("/", 302));
 exported.route("/vault", app);
 exported.route("/", app);

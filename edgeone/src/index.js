@@ -2812,6 +2812,12 @@ exported.get('/', (c) => missingWebVaultPage(c));
 exported.get('/index.html', (c) => missingWebVaultPage(c));
 // 旧书签兼容：/vault 与 /vault/index.html 指回根路径（浏览器会保留 #hash）
 exported.get('/vault', (c) => c.redirect('/', 302));
+// 网页版会为每个登录项请求 /icons/{域名}/icon.png 拿网站图标。我们没有这个服务，
+// 与其让它落到 501 兜底（日志刷屏、界面转圈），不如直接 404 并允许缓存。
+exported.get('/icons/*', (c) => {
+  c.header('cache-control', 'public, max-age=86400');
+  return c.body(null, 404);
+});
 exported.get('/vault/index.html', (c) => c.redirect('/', 302));
 // 先挂 /vault：app 里有一条 all('*') 兜底，若先挂根路径会把它也挂到最前面，
 // 导致 /vault/api/config 先被兜底命中（501）。
