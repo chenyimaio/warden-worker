@@ -1420,15 +1420,16 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: '*' });
 
-  // 优先直传：客户端把字节 PUT 到 Blob（预签名 URL），不经过函数。
-  // 这样单文件上限从平台的 ~6MB 提到 Blob 单对象上限（25 MiB）。
+  // 大附件同样走直传（小附件保持函数上传，行为不变）
   if (declaredSize > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
       { error: `Attachment too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413,
     );
   }
-  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  const direct =
+    declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log('[attachment] create', { id, size: declaredSize, direct: Boolean(direct) });
 
   return c.json({
@@ -1996,25 +1997,32 @@ app.post('/api/sends/file/v2', async (c) => {
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
-  // 优先直传：客户端把字节直接 PUT 到 Blob（预签名 URL），不经过函数。
-  // 单文件上限因此从平台的 ~6MB 提到 Blob 单对象上限（25 MiB）。
+  // 大文件走直传：客户端把字节直接 PUT 到 Blob（预签名 URL），不经过函数，
+  // 因此能突破平台「单次请求体约 6MB」的限制，上限是 Blob 单对象 25 MiB。
+  // 小文件仍然走函数上传 —— 那条路已经被真机验证过，没必要为了大文件去冒险。
+  const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
   if (size > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
       { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413,
     );
   }
-  const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-  if (direct) {
+  if (size > functionMax) {
+    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
+    if (!direct) {
+      return c.json(
+        {
+          error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB`,
+          limit: functionMax,
+        },
+        413,
+      );
+    }
     // 0 = Azure 语义：客户端直接把字节 PUT 到这个 url（不走认证 API、不经过函数）
-    console.log('[send] create -> presigned', { id, size });
+    console.log('[send] create -> presigned', { id, size, functionMax });
     return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
-  console.log('[send] create -> function url', {
-    id,
-    size,
-    uploadMax: Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0,
-  });
+  console.log('[send] create -> function url', { id, size, functionMax });
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
@@ -2710,16 +2718,63 @@ app.delete('/api/accounts', deleteAccount);
 app.post('/api/accounts/delete', deleteAccount);
 
 // ---------------------------------------------------------------- fallback
-app.all('*', (c) =>
-  c.json(
+// 网页版没构建出来时，静态文件不存在，请求会一路走到这里。与其返回一行 JSON 501
+// 让人以为「服务挂了」，不如给一个能看懂的页面：说明是构建期没下载到 Web Vault。
+function missingWebVaultPage(c) {
+  const base = baseUrlOf(c);
+  const html = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网页版未构建 · Warden</title>
+<style>
+ body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:720px;margin:56px auto;padding:0 24px;color:#1f2328;line-height:1.7}
+ h1{font-size:22px;margin:0 0 12px} code{background:#f6f8fa;border:1px solid #d0d7de;border-radius:5px;padding:1px 6px;font-size:13px}
+ pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:12px;font-size:13px;overflow:auto}
+ .warn{border:1px solid #d4a72c;background:#fff8c5;border-radius:8px;padding:12px 14px;margin:18px 0}
+ li{margin:6px 0}
+</style></head><body>
+<h1>网页版（Web Vault）没有构建出来</h1>
+<p>后端是正常的 —— 你现在看到的这个页面，就是函数在响应请求。缺的是构建期应当下载到
+<code>public/vault/</code> 的官方网页版静态文件。</p>
+<div class="warn">这不是环境变量写错的问题：<code>WEB_VAULT_ENABLED=true</code> 只决定「构建时要不要下载」，下载失败时不会有运行时开关能补救。</div>
+<p><b>按顺序检查：</b></p>
+<ol>
+  <li>看构建日志里有没有 <code>[web-vault]</code> 开头的行：应当出现下载地址、解压结果和最终文件数；</li>
+  <li>构建机能否访问 GitHub Releases（国内构建机经常超时）；</li>
+  <li>必要时换下载源：<code>WEB_VAULT_BASE_URL</code> 指向一个可达的镜像；</li>
+  <li>改完环境变量必须<b>重新部署</b>（Makers 不热加载）。</li>
+</ol>
+<p><b>现在能用的入口：</b></p>
+<ul>
+  <li><a href="${base}/api/alive">/api/alive</a> — 服务存活</li>
+  <li><a href="${base}/api/config">/api/config</a> — 客户端配置</li>
+  <li><a href="${base}/api/web-status">/api/web-status</a> — 网页版开关状态</li>
+</ul>
+<p>官方客户端（Android / 浏览器扩展）不受影响，可以照常登录使用：在自托管地址里填
+<code>${base}</code> 即可。</p>
+</body></html>`;
+  return c.html(html, 200);
+}
+
+app.all('*', (c) => {
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method;
+  const accept = c.req.header('accept') ?? '';
+  // 只把「看起来是在要页面」的请求换成提示页；API 和静态资源仍然返回 501 JSON
+  const pageLike =
+    (method === 'GET' || method === 'HEAD') &&
+    accept.includes('text/html') &&
+    !/\/(api|identity)(\/|$)/.test(path) &&
+    !/\.[a-z0-9]{2,5}$/i.test(path);
+  if (pageLike) return missingWebVaultPage(c);
+  return c.json(
     {
       error: 'not_implemented',
-      path: new URL(c.req.url).pathname,
+      path,
       hint: 'route not implemented yet, see README',
     },
     501,
-  ),
-);
+  );
+});
 
 // 网页版部署在 /vault/ 子路径下时，它在拿到 /api/config 之前会用**相对路径**请求：
 //   GET  /vault/api/config

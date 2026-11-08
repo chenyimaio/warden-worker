@@ -16227,7 +16227,8 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
       413
     );
   }
-  const direct = await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id));
+  const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  const direct = declaredSize > functionMax ? await presignedUploadUrl(c, keys.attachmentData(a.claims.sub, id)) : null;
   console.log("[attachment] create", { id, size: declaredSize, direct: Boolean(direct) });
   return c.json({
     attachmentId: id,
@@ -16717,22 +16718,28 @@ app.post("/api/sends/file/v2", async (c) => {
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
   await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
+  const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   if (size > BLOB_OBJECT_MAX_BYTES) {
     return c.json(
       { error: `File too large: up to ${(BLOB_OBJECT_MAX_BYTES / 1024 / 1024).toFixed(0)} MB`, limit: BLOB_OBJECT_MAX_BYTES },
       413
     );
   }
-  const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
-  if (direct) {
-    console.log("[send] create -> presigned", { id, size });
+  if (size > functionMax) {
+    const direct = await presignedUploadUrl(c, keys.sendFile(a.claims.sub, id));
+    if (!direct) {
+      return c.json(
+        {
+          error: `File too large: this deployment accepts uploads up to ${(functionMax / 1024 / 1024).toFixed(1)} MB`,
+          limit: functionMax
+        },
+        413
+      );
+    }
+    console.log("[send] create -> presigned", { id, size, functionMax });
     return c.json({ sendResponse: sendToJson(send), fileUploadType: 0, url: direct });
   }
-  console.log("[send] create -> function url", {
-    id,
-    size,
-    uploadMax: Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0
-  });
+  console.log("[send] create -> function url", { id, size, functionMax });
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),
@@ -17328,17 +17335,55 @@ async function deleteAccount(c) {
 }
 app.delete("/api/accounts", deleteAccount);
 app.post("/api/accounts/delete", deleteAccount);
-app.all(
-  "*",
-  (c) => c.json(
+function missingWebVaultPage(c) {
+  const base = baseUrlOf(c);
+  const html = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>\u7F51\u9875\u7248\u672A\u6784\u5EFA \xB7 Warden</title>
+<style>
+ body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:720px;margin:56px auto;padding:0 24px;color:#1f2328;line-height:1.7}
+ h1{font-size:22px;margin:0 0 12px} code{background:#f6f8fa;border:1px solid #d0d7de;border-radius:5px;padding:1px 6px;font-size:13px}
+ pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:12px;font-size:13px;overflow:auto}
+ .warn{border:1px solid #d4a72c;background:#fff8c5;border-radius:8px;padding:12px 14px;margin:18px 0}
+ li{margin:6px 0}
+</style></head><body>
+<h1>\u7F51\u9875\u7248\uFF08Web Vault\uFF09\u6CA1\u6709\u6784\u5EFA\u51FA\u6765</h1>
+<p>\u540E\u7AEF\u662F\u6B63\u5E38\u7684 \u2014\u2014 \u4F60\u73B0\u5728\u770B\u5230\u7684\u8FD9\u4E2A\u9875\u9762\uFF0C\u5C31\u662F\u51FD\u6570\u5728\u54CD\u5E94\u8BF7\u6C42\u3002\u7F3A\u7684\u662F\u6784\u5EFA\u671F\u5E94\u5F53\u4E0B\u8F7D\u5230
+<code>public/vault/</code> \u7684\u5B98\u65B9\u7F51\u9875\u7248\u9759\u6001\u6587\u4EF6\u3002</p>
+<div class="warn">\u8FD9\u4E0D\u662F\u73AF\u5883\u53D8\u91CF\u5199\u9519\u7684\u95EE\u9898\uFF1A<code>WEB_VAULT_ENABLED=true</code> \u53EA\u51B3\u5B9A\u300C\u6784\u5EFA\u65F6\u8981\u4E0D\u8981\u4E0B\u8F7D\u300D\uFF0C\u4E0B\u8F7D\u5931\u8D25\u65F6\u4E0D\u4F1A\u6709\u8FD0\u884C\u65F6\u5F00\u5173\u80FD\u8865\u6551\u3002</div>
+<p><b>\u6309\u987A\u5E8F\u68C0\u67E5\uFF1A</b></p>
+<ol>
+  <li>\u770B\u6784\u5EFA\u65E5\u5FD7\u91CC\u6709\u6CA1\u6709 <code>[web-vault]</code> \u5F00\u5934\u7684\u884C\uFF1A\u5E94\u5F53\u51FA\u73B0\u4E0B\u8F7D\u5730\u5740\u3001\u89E3\u538B\u7ED3\u679C\u548C\u6700\u7EC8\u6587\u4EF6\u6570\uFF1B</li>
+  <li>\u6784\u5EFA\u673A\u80FD\u5426\u8BBF\u95EE GitHub Releases\uFF08\u56FD\u5185\u6784\u5EFA\u673A\u7ECF\u5E38\u8D85\u65F6\uFF09\uFF1B</li>
+  <li>\u5FC5\u8981\u65F6\u6362\u4E0B\u8F7D\u6E90\uFF1A<code>WEB_VAULT_BASE_URL</code> \u6307\u5411\u4E00\u4E2A\u53EF\u8FBE\u7684\u955C\u50CF\uFF1B</li>
+  <li>\u6539\u5B8C\u73AF\u5883\u53D8\u91CF\u5FC5\u987B<b>\u91CD\u65B0\u90E8\u7F72</b>\uFF08Makers \u4E0D\u70ED\u52A0\u8F7D\uFF09\u3002</li>
+</ol>
+<p><b>\u73B0\u5728\u80FD\u7528\u7684\u5165\u53E3\uFF1A</b></p>
+<ul>
+  <li><a href="${base}/api/alive">/api/alive</a> \u2014 \u670D\u52A1\u5B58\u6D3B</li>
+  <li><a href="${base}/api/config">/api/config</a> \u2014 \u5BA2\u6237\u7AEF\u914D\u7F6E</li>
+  <li><a href="${base}/api/web-status">/api/web-status</a> \u2014 \u7F51\u9875\u7248\u5F00\u5173\u72B6\u6001</li>
+</ul>
+<p>\u5B98\u65B9\u5BA2\u6237\u7AEF\uFF08Android / \u6D4F\u89C8\u5668\u6269\u5C55\uFF09\u4E0D\u53D7\u5F71\u54CD\uFF0C\u53EF\u4EE5\u7167\u5E38\u767B\u5F55\u4F7F\u7528\uFF1A\u5728\u81EA\u6258\u7BA1\u5730\u5740\u91CC\u586B
+<code>${base}</code> \u5373\u53EF\u3002</p>
+</body></html>`;
+  return c.html(html, 200);
+}
+app.all("*", (c) => {
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method;
+  const accept = c.req.header("accept") ?? "";
+  const pageLike = (method === "GET" || method === "HEAD") && accept.includes("text/html") && !/\/(api|identity)(\/|$)/.test(path) && !/\.[a-z0-9]{2,5}$/i.test(path);
+  if (pageLike) return missingWebVaultPage(c);
+  return c.json(
     {
       error: "not_implemented",
-      path: new URL(c.req.url).pathname,
+      path,
       hint: "route not implemented yet, see README"
     },
     501
-  )
-);
+  );
+});
 var exported = new Hono3();
 exported.use("*", cors());
 exported.get("/", (c) => c.redirect("/vault/", 302));

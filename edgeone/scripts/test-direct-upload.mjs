@@ -79,20 +79,22 @@ const token = (await formRes.json()).access_token;
 const deletionDate = new Date(Date.now() + 86400e3).toISOString();
 const sendBody = (size, name) => ({ type: 1, name, key: 'k', deletionDate, fileLength: size });
 
-// 1) 内存存储不支持预签名 -> 回退到函数内上传，type 1
-let r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(1024, 'fallback') });
-check(
-  '存储不支持预签名时回退到函数地址',
-  r.status === 200 && r.data.fileUploadType === 1 && String(r.data.url).includes('/api/sends/'),
-  r.data,
-);
-
-// 2) 存储支持预签名 -> Blob URL + type 0（Azure 语义）
+// 存储支持预签名（模拟线上 Blob）
 let lastKey = null;
 store.createUploadUrl = async (key) => {
   lastKey = key;
   return `https://blob.example.com/${encodeURI(key)}?signature=stub`;
 };
+
+// 1) 小文件（<= 6MiB）走函数上传，即使存储支持预签名也不改行为
+let r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(1024, 'small') });
+check(
+  '小文件走函数地址（fileUploadType 1）',
+  r.status === 200 && r.data.fileUploadType === 1 && String(r.data.url).includes('/api/sends/'),
+  r.data,
+);
+
+// 2) 大文件（> 6MiB）走直传 -> Blob URL + type 0（Azure 语义）
 r = await call('POST', '/api/sends/file/v2', { token, body: sendBody(8 * 1024 * 1024, 'presigned') });
 check(
   '支持预签名时返回 Blob 地址',

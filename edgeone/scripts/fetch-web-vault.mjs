@@ -45,9 +45,21 @@ const base =
 const tarball = `bw_web_${VERSION}.tar.gz`;
 
 async function download(url, dest) {
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
+  // 构建机网络抖动很常见，重试几次比直接放弃划算
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const res = await fetch(url, { redirect: 'follow' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
+      return;
+    } catch (e) {
+      lastErr = e;
+      log(`下载失败（第 ${attempt}/3 次）:`, e.message);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
+  }
+  throw new Error(`${lastErr?.message || 'unknown'} <- ${url}`);
 }
 
 /** 递归列出文件（返回 {path, size}）。 */
@@ -137,6 +149,16 @@ async function main() {
 }
 
 main().catch((e) => {
-  log('失败（不影响部署，站点将只有落地页）:', e.message);
+  log('============================================================');
+  log('网页版下载失败，本次部署将没有 /vault/ 网页版（后端功能不受影响）');
+  log('原因:', e.message);
+  log('下载地址:', `${base}/${tarball}`);
+  log('');
+  log('处理办法：');
+  log('  1) 确认构建机能访问上面这个地址（国内构建机访问 GitHub Releases 常超时）');
+  log('  2) 换下载源：设置 WEB_VAULT_BASE_URL 指向可达的镜像，然后重新部署');
+  log('  3) 或者设 WEB_VAULT_ENABLED=false 明确表示「不要网页版」');
+  log('注意：镜像属于第三方，网页版会拿到你的主密码，请只使用你信任的源。');
+  log('============================================================');
   process.exit(0);
 });
