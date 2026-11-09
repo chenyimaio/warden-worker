@@ -1,6 +1,6 @@
 # warden-edgeone
 
-把 [warden-worker](https://github.com/qaz741wsd856/warden-worker) 的 Bitwarden 兼容后端重写到 **EdgeOne Makers**（国内站，已备案域名）上：
+把 [warden-worker](https://github.com/qaz741wsd856/warden-worker) 的 Bitwarden 兼容后端重写到 **EdgeOne Makers**（国内站与国际站均支持）：
 **Cloud Functions (Node.js) + Makers Blob 存储 + 可选的项目内直连 SMTP**。
 
 > 这不是把 Rust/WASM 搬过去，而是按 Rust 源码当行为规范重写：
@@ -9,7 +9,11 @@
 
 [![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET)
 
-> 上面这个按钮是 **国内站（console.cloud.tencent.com）**，需要腾讯云账号；国际站（edgeone.ai）的链接见[第二节](#二一键部署)的表格。
+<sub>国内站 · console.cloud.tencent.com（需要腾讯云账号）</sub>
+
+[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET)
+
+<sub>国际站 · edgeone.ai</sub>
 
 ## 目录
 
