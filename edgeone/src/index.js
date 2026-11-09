@@ -1105,7 +1105,7 @@ async function checkMasterPassword(c, user, providedHash) {
 /**  Rust masterPasswordHashTP  */
 async function checkPassword(c, user, p) {
   const mph = String(p.masterPasswordHash ?? '');
-  if (!mph) return { error: 'Missing master password hash', status: 400 };
+  if (!mph) return { error: 'Missing master password hash', message: 'Missing master password hash', statusCode: 400, status: 400 };
   if (!(await checkMasterPassword(c, user, mph))) {
     return { error: 'Invalid password', status: 401 };
   }
@@ -1150,7 +1150,7 @@ app.post('/api/two-factor/get-authenticator', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const store = getStore(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
@@ -1166,7 +1166,7 @@ async function activateAuthenticator(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const key = String(p.key ?? '').toUpperCase().replace(/\s+/g, '');
   let decoded;
@@ -1214,7 +1214,7 @@ app.delete('/api/two-factor/authenticator', async (c) => {
     return c.json({ error: 'Invalid two factor type' }, 400);
   }
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const store = getStore(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
@@ -1233,7 +1233,7 @@ async function disableTwoFactor(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const atype = Number(p.type ?? TFA_AUTHENTICATOR);
   const store = getStore(c.env);
@@ -1249,7 +1249,7 @@ app.post('/api/two-factor/get-recover', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   return c.json({ code: a.user.totpRecover ?? null, object: 'twoFactorRecover' });
 });
 
@@ -1259,7 +1259,7 @@ app.post('/api/accounts/password', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   // 新版客户端（Web 2026.x / 移动端）把新密码信息放进 masterPasswordAuthenticationData /
   // masterPasswordUnlockData，老客户端直接给 newMasterPasswordHash / key。两种都认，
@@ -1276,7 +1276,7 @@ app.post('/api/accounts/password', async (c) => {
       unlockData.masterKeyAuthenticationHash ??
       '',
   );
-  if (!newMph) return c.json({ error: 'Missing newMasterPasswordHash' }, 400);
+  if (!newMph) return c.json({ error: 'Missing newMasterPasswordHash', message: 'Missing newMasterPasswordHash', statusCode: 400 }, 400);
 
   const store = getStore(c.env);
   const salt = randomB64();
@@ -1326,7 +1326,7 @@ app.post('/api/accounts/kdf', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const authData = p.authenticationData ?? {};
   const unlockData = p.unlockData ?? {};
@@ -1373,7 +1373,7 @@ app.post('/api/accounts/security-stamp', async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const store = getStore(c.env);
   await revokeDevices(store, a.claims.sub);
@@ -2273,7 +2273,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
   const p = await body(c);
 
   const check = await checkPassword(c, a.user, { masterPasswordHash: p.oldMasterKeyAuthenticationHash });
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const unlock = p.accountUnlockData?.masterPasswordUnlockData ?? {};
   const kdfType = Number(unlock.kdfType ?? a.user.kdfType);
@@ -2778,7 +2778,7 @@ async function deleteAccount(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
   const store = getStore(c.env);
   const root = `u/${a.claims.sub}/`;

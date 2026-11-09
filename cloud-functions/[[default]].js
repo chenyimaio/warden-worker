@@ -15964,7 +15964,7 @@ async function checkMasterPassword(c, user, providedHash) {
 }
 async function checkPassword(c, user, p) {
   const mph = String(p.masterPasswordHash ?? "");
-  if (!mph) return { error: "Missing master password hash", status: 400 };
+  if (!mph) return { error: "Missing master password hash", message: "Missing master password hash", statusCode: 400, status: 400 };
   if (!await checkMasterPassword(c, user, mph)) {
     return { error: "Invalid password", status: 401 };
   }
@@ -16005,7 +16005,7 @@ app.post("/api/two-factor/get-authenticator", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const store = getStore2(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
   return c.json({
@@ -16019,7 +16019,7 @@ async function activateAuthenticator(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const key = String(p.key ?? "").toUpperCase().replace(/\s+/g, "");
   let decoded;
   try {
@@ -16062,7 +16062,7 @@ app.delete("/api/two-factor/authenticator", async (c) => {
     return c.json({ error: "Invalid two factor type" }, 400);
   }
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const store = getStore2(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
   if (!tf) return c.json({ error: "TOTP not configured" }, 400);
@@ -16078,7 +16078,7 @@ async function disableTwoFactor(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const atype = Number(p.type ?? TFA_AUTHENTICATOR);
   const store = getStore2(c.env);
   await delTwoFactor(store, a.claims.sub, atype);
@@ -16092,7 +16092,7 @@ app.post("/api/two-factor/get-recover", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   return c.json({ code: a.user.totpRecover ?? null, object: "twoFactorRecover" });
 });
 app.post("/api/accounts/password", async (c) => {
@@ -16100,13 +16100,13 @@ app.post("/api/accounts/password", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const authData = p.masterPasswordAuthenticationData ?? {};
   const unlockData = p.masterPasswordUnlockData ?? {};
   const newMph = String(
     p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? unlockData.masterKeyAuthenticationHash ?? ""
   );
-  if (!newMph) return c.json({ error: "Missing newMasterPasswordHash" }, 400);
+  if (!newMph) return c.json({ error: "Missing newMasterPasswordHash", message: "Missing newMasterPasswordHash", statusCode: 400 }, 400);
   const store = getStore2(c.env);
   const salt = randomB64();
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
@@ -16143,7 +16143,7 @@ app.post("/api/accounts/kdf", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const authData = p.authenticationData ?? {};
   const unlockData = p.unlockData ?? {};
   if (String(authData.salt ?? "") !== a.user.email || String(unlockData.salt ?? "") !== a.user.email) {
@@ -16187,7 +16187,7 @@ app.post("/api/accounts/security-stamp", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const store = getStore2(c.env);
   await revokeDevices(store, a.claims.sub);
   await rotateStamp(store, a.claims.sub);
@@ -16942,7 +16942,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, { masterPasswordHash: p.oldMasterKeyAuthenticationHash });
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const unlock = p.accountUnlockData?.masterPasswordUnlockData ?? {};
   const kdfType = Number(unlock.kdfType ?? a.user.kdfType);
   const kdfIterations = Number(unlock.kdfIterations ?? a.user.kdfIterations);
@@ -17391,7 +17391,7 @@ async function deleteAccount(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error }, check.status);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const store = getStore2(c.env);
   const root = `u/${a.claims.sub}/`;
   const items = await store.list(root);
