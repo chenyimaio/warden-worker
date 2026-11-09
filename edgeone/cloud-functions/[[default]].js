@@ -16104,7 +16104,7 @@ app.post("/api/accounts/password", async (c) => {
   const authData = p.masterPasswordAuthenticationData ?? {};
   const unlockData = p.masterPasswordUnlockData ?? {};
   const newMph = String(
-    p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? ""
+    p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? unlockData.masterKeyAuthenticationHash ?? ""
   );
   if (!newMph) return c.json({ error: "Missing newMasterPasswordHash" }, 400);
   const store = getStore2(c.env);
@@ -16112,7 +16112,7 @@ app.post("/api/accounts/password", async (c) => {
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
-  const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.key ?? null;
+  const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.masterKeyEncryptedUserKey ?? unlockData.key ?? null;
   const kdf = unlockData.kdf ?? null;
   const kdfFields = kdf ? {
     kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
@@ -16981,6 +16981,8 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
       return c.json({ error: "All existing ciphers and folders must be included in the rotation" }, 400);
     }
   }
+  const rotationMph = String(unlock.masterKeyAuthenticationHash ?? "");
+  if (!rotationMph) return c.json({ error: "Missing masterKeyAuthenticationHash" }, 400);
   for (const rf of reqFolders) {
     await mutate(
       store,
@@ -17026,8 +17028,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
   }
   const salt = randomB64();
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
-  const newMph = String(unlock.masterKeyAuthenticationHash ?? "");
-  if (!newMph) return c.json({ error: "Missing masterKeyAuthenticationHash" }, 400);
+  const newMph = rotationMph;
   const stamp = newId();
   await mutate(
     store,

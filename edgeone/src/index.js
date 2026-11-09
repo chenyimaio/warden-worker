@@ -1266,8 +1266,15 @@ app.post('/api/accounts/password', async (c) => {
   // 否则改密会静默失败（客户端以为成功了，服务端还是旧密码，下次登录就报错）。
   const authData = p.masterPasswordAuthenticationData ?? {};
   const unlockData = p.masterPasswordUnlockData ?? {};
+  // 命名有两代：masterKeyAuthenticationHash（轮换接口用的就是它）、
+  // masterPasswordAuthenticationHash（较新的 SDK）。两个都要认，否则新版网页版
+  // 改密码会被判成「没给新密码」而 400。
   const newMph = String(
-    p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? '',
+    p.newMasterPasswordHash ??
+      p.newMasterPasswordHashB64 ??
+      authData.masterPasswordAuthenticationHash ??
+      unlockData.masterKeyAuthenticationHash ??
+      '',
   );
   if (!newMph) return c.json({ error: 'Missing newMasterPasswordHash' }, 400);
 
@@ -1276,7 +1283,12 @@ app.post('/api/accounts/password', async (c) => {
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
-  const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.key ?? null;
+  const newKey =
+    p.key ??
+    unlockData.masterKeyWrappedUserKey ??
+    unlockData.masterKeyEncryptedUserKey ??
+    unlockData.key ??
+    null;
 
   // 客户端可能同时换了 KDF：跟着更新，否则 prelogin 会返回旧参数，客户端推导出的
   // masterPasswordHash 永远对不上。
@@ -2311,6 +2323,11 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
     }
   }
 
+  // 先校验再动数据：下面会重写所有 entries，如果走到最后才发现缺字段而返回 400，
+  // 数据已经被新密钥加密过，旧密钥再也解不开 —— 必须提前拦。
+  const rotationMph = String(unlock.masterKeyAuthenticationHash ?? '');
+  if (!rotationMph) return c.json({ error: 'Missing masterKeyAuthenticationHash' }, 400);
+
 // apply rotation: cipher payloads / folder names / attachment keys
   for (const rf of reqFolders) {
     await mutate(store, keys.folder(a.claims.sub, String(rf.id)), (cur) =>
@@ -2355,8 +2372,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
 // new salt + hash + keys + security stamp, then revoke all devices
 const salt = randomB64();
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
-  const newMph = String(unlock.masterKeyAuthenticationHash ?? '');
-  if (!newMph) return c.json({ error: 'Missing masterKeyAuthenticationHash' }, 400);
+  const newMph = rotationMph;
   const stamp = newId();
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
