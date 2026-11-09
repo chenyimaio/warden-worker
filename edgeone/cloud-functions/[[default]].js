@@ -15078,6 +15078,33 @@ async function limit(c, kind, id, max, windowSec) {
   await store.put(key, { start: sameWindow ? cur.start : now, count: count + 1 });
   return null;
 }
+async function limits(c, specs) {
+  const store = getStore2(c.env);
+  const now = Date.now();
+  const entries = specs.map((s) => ({
+    spec: s,
+    key: keys.rate(`${s.kind}/${createHash2("sha256").update(`${s.kind}:${s.id}`).digest("hex").slice(0, 32)}`)
+  }));
+  const rows = await Promise.all(entries.map((e) => store.get(e.key)));
+  const writes = [];
+  for (let i = 0; i < entries.length; i++) {
+    const { spec, key } = entries[i];
+    const cur = rows[i]?.value;
+    const sameWindow = cur && now - cur.start < spec.windowSec * 1e3;
+    const count = sameWindow ? cur.count : 0;
+    if (count >= spec.max) {
+      const retry = Math.max(1, Math.ceil((spec.windowSec * 1e3 - (now - cur.start)) / 1e3));
+      return {
+        blocked: c.json({ error: "Too many requests. Please try again later." }, 429, {
+          "retry-after": String(retry)
+        })
+      };
+    }
+    writes.push([key, { start: sameWindow ? cur.start : now, count: count + 1 }]);
+  }
+  await Promise.all(writes.map(([k, v]) => store.put(k, v)));
+  return { blocked: null };
+}
 var HINT_KEYS = ["masterPasswordHint", "hint", "masterPasswordHintB64", ""];
 function readHint(p) {
   for (const k of HINT_KEYS) {
@@ -15383,11 +15410,14 @@ app.post("/identity/connect/token", async (c) => {
   if (grant === "password") {
     const email = String(p.username ?? "").trim().toLowerCase();
     const mph = String(p.password ?? "");
-    const rlEmail = await limit(c, "login-email", email, 20, 60);
-    if (rlEmail) return rlEmail;
-    const rlIp = await limit(c, "login-ip", requestIp(c), 60, 60);
-    if (rlIp) return rlIp;
-    const user = await findUserByEmail(c, email);
+    const [rl, user] = await Promise.all([
+      limits(c, [
+        { kind: "login-email", id: email, max: 20, windowSec: 60 },
+        { kind: "login-ip", id: requestIp(c), max: 60, windowSec: 60 }
+      ]),
+      findUserByEmail(c, email)
+    ]);
+    if (rl.blocked) return rl.blocked;
     if (!user) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     const authRequestId = String(p.authrequest ?? p.authRequest ?? "");
     if (authRequestId) {
@@ -15403,13 +15433,15 @@ app.post("/identity/connect/token", async (c) => {
     const deviceId = String(p.device_identifier ?? p.deviceIdentifier ?? newId());
     const deviceType = Number(p.device_type ?? p.deviceType ?? 14);
     const now = nowIso();
-    const device = await mutate(store, keys.device(user.id, deviceId), (cur) => ({
-      ...cur ?? { id: deviceId, userId: user.id, refreshId: newId(), createdAt: now },
-      name: String(p.device_name ?? p.deviceName ?? cur?.name ?? "device"),
-      type: deviceType,
-      updatedAt: now
-    }));
-    const tf = await getTwoFactor(store, user.id, TFA_AUTHENTICATOR);
+    const [device, tf] = await Promise.all([
+      mutate(store, keys.device(user.id, deviceId), (cur) => ({
+        ...cur ?? { id: deviceId, userId: user.id, refreshId: newId(), createdAt: now },
+        name: String(p.device_name ?? p.deviceName ?? cur?.name ?? "device"),
+        type: deviceType,
+        updatedAt: now
+      })),
+      getTwoFactor(store, user.id, TFA_AUTHENTICATOR)
+    ]);
     let twoFactorToken;
     if (tf?.enabled) {
       const provider = p.twoFactorProvider != null && p.twoFactorProvider !== "" ? Number(p.twoFactorProvider) : TFA_AUTHENTICATOR;
@@ -15485,9 +15517,12 @@ app.post("/identity/connect/token", async (c) => {
     } catch {
       return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     }
-    const device = await store.get(keys.device(String(payload.userId ?? ""), String(payload.deviceId ?? "")));
+    const refreshUid = String(payload.userId ?? "");
+    const [device, prof] = await Promise.all([
+      store.get(keys.device(refreshUid, String(payload.deviceId ?? ""))),
+      store.get(keys.profile(refreshUid))
+    ]);
     if (!device) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
-    const prof = await store.get(keys.profile(device.value.userId));
     if (!prof) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     const user = prof.value;
     if (payload.refreshId !== device.value.refreshId || payload.sstamp !== user.securityStamp) {
@@ -15976,7 +16011,8 @@ async function rotateStamp(store, uid) {
 }
 async function revokeDevices(store, uid) {
   const idx = await store.list(keys.devices(uid));
-  for (const it of idx) await store.del(it.key);
+  await Promise.all(idx.map((it) => store.del(it.key).catch(() => {
+  })));
 }
 async function clearRecoveryIfNoTwoFactor(store, uid) {
   const tf = await getTwoFactor(store, uid, TFA_AUTHENTICATOR);

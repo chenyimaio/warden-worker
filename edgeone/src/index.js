@@ -98,6 +98,39 @@ async function limit(c, kind, id, max, windowSec) {
   return null;
 }
 
+/**
+ * 多个限流器一次做完：并行读 + 并行写。
+ * 每次 Blob 往返约 100ms，串行调用两个 limit() 就是 4 趟 ≈ 400ms，
+ * 合成一次只要 2 趟。
+ */
+async function limits(c, specs) {
+  const store = getStore(c.env);
+  const now = Date.now();
+  const entries = specs.map((s) => ({
+    spec: s,
+    key: keys.rate(`${s.kind}/${createHash('sha256').update(`${s.kind}:${s.id}`).digest('hex').slice(0, 32)}`),
+  }));
+  const rows = await Promise.all(entries.map((e) => store.get(e.key)));
+  const writes = [];
+  for (let i = 0; i < entries.length; i++) {
+    const { spec, key } = entries[i];
+    const cur = rows[i]?.value;
+    const sameWindow = cur && now - cur.start < spec.windowSec * 1000;
+    const count = sameWindow ? cur.count : 0;
+    if (count >= spec.max) {
+      const retry = Math.max(1, Math.ceil((spec.windowSec * 1000 - (now - cur.start)) / 1000));
+      return {
+        blocked: c.json({ error: 'Too many requests. Please try again later.' }, 429, {
+          'retry-after': String(retry),
+        }),
+      };
+    }
+    writes.push([key, { start: sameWindow ? cur.start : now, count: count + 1 }]);
+  }
+  await Promise.all(writes.map(([k, v]) => store.put(k, v)));
+  return { blocked: null };
+}
+
 // 主密码提示的取值：不同客户端/版本用过的字段名不止一个，
 // 个别情况下还会把值塞进空字符串键（历史数据兼容），统一在这里收口。
 // 提示字段名有三代写法：
@@ -458,11 +491,15 @@ app.post('/identity/connect/token', async (c) => {
   if (grant === 'password') {
     const email = String(p.username ?? '').trim().toLowerCase();
     const mph = String(p.password ?? '');
-    const rlEmail = await limit(c, 'login-email', email, 20, 60);
-    if (rlEmail) return rlEmail;
-    const rlIp = await limit(c, 'login-ip', requestIp(c), 60, 60);
-    if (rlIp) return rlIp;
-    const user = await findUserByEmail(c, email);
+    // 限流和查用户互不依赖：合并成一次并行，省掉 2 趟串行往返
+    const [rl, user] = await Promise.all([
+      limits(c, [
+        { kind: 'login-email', id: email, max: 20, windowSec: 60 },
+        { kind: 'login-ip', id: requestIp(c), max: 60, windowSec: 60 },
+      ]),
+      findUserByEmail(c, email),
+    ]);
+    if (rl.blocked) return rl.blocked;
     if (!user) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
 
     // login with deviceassword  access code
@@ -488,16 +525,19 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     const deviceId = String(p.device_identifier ?? p.deviceIdentifier ?? newId());
     const deviceType = Number(p.device_type ?? p.deviceType ?? 14);
     const now = nowIso();
+    // 写设备和读 2FA 互不依赖：并行，省一趟往返
 // merge instead of overwrite: keep twofactorRemember / pushToken / refreshId
-    const device = await mutate(store, keys.device(user.id, deviceId), (cur) => ({
-      ...(cur ?? { id: deviceId, userId: user.id, refreshId: newId(), createdAt: now }),
-      name: String(p.device_name ?? p.deviceName ?? cur?.name ?? 'device'),
-      type: deviceType,
-      updatedAt: now,
-    }));
+    const [device, tf] = await Promise.all([
+      mutate(store, keys.device(user.id, deviceId), (cur) => ({
+        ...(cur ?? { id: deviceId, userId: user.id, refreshId: newId(), createdAt: now }),
+        name: String(p.device_name ?? p.deviceName ?? cur?.name ?? 'device'),
+        type: deviceType,
+        updatedAt: now,
+      })),
+      getTwoFactor(store, user.id, TFA_AUTHENTICATOR),
+    ]);
 
     // ---- 2FA OTP(0) / Remember(5) / RecoveryCode(8) ----
-    const tf = await getTwoFactor(store, user.id, TFA_AUTHENTICATOR);
     let twoFactorToken;
     if (tf?.enabled) {
       const provider = p.twoFactorProvider != null && p.twoFactorProvider !== ''
@@ -574,9 +614,13 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     } catch {
       return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
-    const device = await store.get(keys.device(String(payload.userId ?? ''), String(payload.deviceId ?? '')));
+    // 设备与 profile 互不依赖（都用令牌里的 userId），并行读省一趟往返
+    const refreshUid = String(payload.userId ?? '');
+    const [device, prof] = await Promise.all([
+      store.get(keys.device(refreshUid, String(payload.deviceId ?? ''))),
+      store.get(keys.profile(refreshUid)),
+    ]);
     if (!device) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
-    const prof = await store.get(keys.profile(device.value.userId));
     if (!prof) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     const user = prof.value;
     if (payload.refreshId !== device.value.refreshId || payload.sstamp !== user.securityStamp) {
@@ -1123,7 +1167,8 @@ async function rotateStamp(store, uid) {
 /** efresh / remember token ?*/
 async function revokeDevices(store, uid) {
   const idx = await store.list(keys.devices(uid));
-  for (const it of idx) await store.del(it.key);
+  // 并行删除：设备多时串行会是好几趟往返
+  await Promise.all(idx.map((it) => store.del(it.key).catch(() => {})));
 }
 
 /**  TOTP ?*/
