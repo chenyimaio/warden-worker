@@ -15317,11 +15317,21 @@ async function register(c) {
   const now = nowIso();
   const salt = randomB64();
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
-  const masterPasswordHash = String(p.masterPasswordHash ?? p.masterPasswordHashB64 ?? "");
+  const regAuth = p.masterPasswordAuthenticationData ?? {};
+  const regUnlock = p.masterPasswordUnlockData ?? {};
+  const regKdf = regUnlock.kdf ?? regAuth.kdf ?? null;
+  const masterPasswordHash = String(
+    p.masterPasswordHash ?? p.masterPasswordHashB64 ?? regAuth.masterPasswordAuthenticationHash ?? ""
+  );
   if (!masterPasswordHash) return c.json({ error: "missing masterPasswordHash" }, 400);
-  const userSymmetricKey = String(p.userSymmetricKey ?? p.key ?? "");
+  const userSymmetricKey = String(p.userSymmetricKey ?? p.key ?? regUnlock.masterKeyWrappedUserKey ?? "");
   if (!userSymmetricKey) return c.json({ error: "missing userSymmetricKey" }, 400);
-  const asym = p.userAsymmetricKeys ?? p.keys ?? {};
+  const keyPair = p.accountKeys?.publicKeyEncryptionKeyPair ?? null;
+  const asym = p.userAsymmetricKeys ?? p.keys ?? (keyPair ? { encryptedPrivateKey: keyPair.wrappedPrivateKey ?? "", publicKey: keyPair.publicKey ?? "" } : {});
+  const kdfType = Number(p.kdf ?? regKdf?.kdfType ?? regKdf?.type ?? 0) || 0;
+  const kdfIterations = Number(p.kdfIterations ?? regKdf?.iterations ?? iterations) || iterations;
+  const kdfMemory = p.kdfMemory ?? regKdf?.memory ?? null;
+  const kdfParallelism = p.kdfParallelism ?? regKdf?.parallelism ?? null;
   const user = {
     id,
     email,
@@ -15334,10 +15344,10 @@ async function register(c) {
     key: userSymmetricKey,
     privateKey: String(asym.encryptedPrivateKey ?? ""),
     publicKey: String(asym.publicKey ?? ""),
-    kdfType: Number(p.kdf ?? 0),
-    kdfIterations: Number(p.kdfIterations ?? 6e5),
-    kdfMemory: p.kdfMemory ?? null,
-    kdfParallelism: p.kdfParallelism ?? null,
+    kdfType,
+    kdfIterations,
+    kdfMemory,
+    kdfParallelism,
     securityStamp: newId(),
     avatarColor: null,
     totpRecover: null,

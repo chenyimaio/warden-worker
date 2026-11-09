@@ -363,15 +363,36 @@ async function register(c) {
   const now = nowIso();
   const salt = randomB64();
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
-  const masterPasswordHash = String(p.masterPasswordHash ?? p.masterPasswordHashB64 ?? '');
+
+  // 新版客户端（网页版 2026.x / 移动端）不再发扁平字段，而是把注册信息放在
+  // masterPasswordAuthenticationData / masterPasswordUnlockData / accountKeys 里。
+  // 只认扁平字段会导致注册恒返回 400 missing masterPasswordHash。
+  const regAuth = p.masterPasswordAuthenticationData ?? {};
+  const regUnlock = p.masterPasswordUnlockData ?? {};
+  const regKdf = regUnlock.kdf ?? regAuth.kdf ?? null;
+
+  const masterPasswordHash = String(
+    p.masterPasswordHash ?? p.masterPasswordHashB64 ?? regAuth.masterPasswordAuthenticationHash ?? '',
+  );
   if (!masterPasswordHash) return c.json({ error: 'missing masterPasswordHash' }, 400);
 
   // 真实客户端（Android/iOS/Web）用的是 userSymmetricKey + userAsymmetricKeys，
-  // 兼容旧字段名 key / keys，否则会把空串写进 key 字段，客户端解密时直接报
-  // "EncString error, Invalid symmetric type, got type 0 with 1 parts"。
-  const userSymmetricKey = String(p.userSymmetricKey ?? p.key ?? '');
+  // 兼容旧字段名 key / keys，以及新版的 masterPasswordUnlockData / accountKeys。
+  const userSymmetricKey = String(p.userSymmetricKey ?? p.key ?? regUnlock.masterKeyWrappedUserKey ?? '');
   if (!userSymmetricKey) return c.json({ error: 'missing userSymmetricKey' }, 400);
-  const asym = p.userAsymmetricKeys ?? p.keys ?? {};
+
+  const keyPair = p.accountKeys?.publicKeyEncryptionKeyPair ?? null;
+  const asym =
+    p.userAsymmetricKeys ??
+    p.keys ??
+    (keyPair
+      ? { encryptedPrivateKey: keyPair.wrappedPrivateKey ?? '', publicKey: keyPair.publicKey ?? '' }
+      : {});
+
+  const kdfType = Number(p.kdf ?? regKdf?.kdfType ?? regKdf?.type ?? 0) || 0;
+  const kdfIterations = Number(p.kdfIterations ?? regKdf?.iterations ?? iterations) || iterations;
+  const kdfMemory = p.kdfMemory ?? regKdf?.memory ?? null;
+  const kdfParallelism = p.kdfParallelism ?? regKdf?.parallelism ?? null;
 
   const user = {
     id,
@@ -385,10 +406,10 @@ async function register(c) {
     key: userSymmetricKey,
     privateKey: String(asym.encryptedPrivateKey ?? ''),
     publicKey: String(asym.publicKey ?? ''),
-    kdfType: Number(p.kdf ?? 0),
-    kdfIterations: Number(p.kdfIterations ?? 600000),
-    kdfMemory: p.kdfMemory ?? null,
-    kdfParallelism: p.kdfParallelism ?? null,
+    kdfType,
+    kdfIterations,
+    kdfMemory,
+    kdfParallelism,
     securityStamp: newId(),
     avatarColor: null,
     totpRecover: null,
