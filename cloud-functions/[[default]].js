@@ -16983,6 +16983,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
   }
   const rotationMph = String(unlock.masterKeyAuthenticationHash ?? "");
   if (!rotationMph) return c.json({ error: "Missing masterKeyAuthenticationHash" }, 400);
+  const rotationHint = hasHintField(unlock) ? hintFieldsFrom(readHint(unlock)) : null;
   for (const rf of reqFolders) {
     await mutate(
       store,
@@ -17038,8 +17039,9 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
       masterPasswordHash: hashPassword(newMph, salt, iterations),
       passwordSalt: salt,
       passwordIterations: iterations,
-      key: unlock.masterKeyEncryptedUserKey ?? cur.key,
+      key: unlock.masterKeyEncryptedUserKey ?? unlock.masterKeyWrappedUserKey ?? cur.key,
       privateKey: p.accountKeys.userKeyEncryptedAccountPrivateKey ?? cur.privateKey,
+      ...rotationHint ?? {},
       securityStamp: stamp,
       updatedAt: nowIso()
     } : void 0

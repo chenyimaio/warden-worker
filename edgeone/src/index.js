@@ -2327,6 +2327,9 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
   // 数据已经被新密钥加密过，旧密钥再也解不开 —— 必须提前拦。
   const rotationMph = String(unlock.masterKeyAuthenticationHash ?? '');
   if (!rotationMph) return c.json({ error: 'Missing masterKeyAuthenticationHash' }, 400);
+  // 客户端的 masterPasswordUnlockData 里带着 masterPasswordHint；不读它，
+  // 「勾选轮换密钥」时改的提示就永远不会落库。
+  const rotationHint = hasHintField(unlock) ? hintFieldsFrom(readHint(unlock)) : null;
 
 // apply rotation: cipher payloads / folder names / attachment keys
   for (const rf of reqFolders) {
@@ -2381,8 +2384,9 @@ const salt = randomB64();
           masterPasswordHash: hashPassword(newMph, salt, iterations),
           passwordSalt: salt,
           passwordIterations: iterations,
-          key: unlock.masterKeyEncryptedUserKey ?? cur.key,
+          key: unlock.masterKeyEncryptedUserKey ?? unlock.masterKeyWrappedUserKey ?? cur.key,
           privateKey: p.accountKeys.userKeyEncryptedAccountPrivateKey ?? cur.privateKey,
+          ...(rotationHint ?? {}),
           securityStamp: stamp,
           updatedAt: nowIso(),
         }
