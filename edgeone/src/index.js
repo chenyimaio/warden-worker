@@ -2880,62 +2880,42 @@ app.delete('/api/accounts', deleteAccount);
 app.post('/api/accounts/delete', deleteAccount);
 
 // ---------------------------------------------------------------- fallback
-// 网页版没构建出来时，静态文件不存在，请求会一路走到这里。与其返回一行 JSON 501
-// 让人以为「服务挂了」，不如给一个能看懂的页面：说明是构建期没下载到 Web Vault。
-function missingWebVaultPage(c) {
+// 不存在的路径一律 404。网页版用的是 hash 路由（/#/login），不存在需要服务端兜底的
+// 前端深链接，所以这里不必把未知路径改写成 index.html。
+function notFoundPage(c) {
   const base = baseUrlOf(c);
   const html = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>网页版未构建 · Warden</title>
+<title>404 · 页面不存在</title>
 <style>
- body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:720px;margin:56px auto;padding:0 24px;color:#1f2328;line-height:1.7}
- h1{font-size:22px;margin:0 0 12px} code{background:#f6f8fa;border:1px solid #d0d7de;border-radius:5px;padding:1px 6px;font-size:13px}
- pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:12px;font-size:13px;overflow:auto}
- .warn{border:1px solid #d4a72c;background:#fff8c5;border-radius:8px;padding:12px 14px;margin:18px 0}
- li{margin:6px 0}
+ body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;max-width:640px;margin:64px auto;padding:0 24px;color:#1f2328;line-height:1.7}
+ .code{font-size:64px;font-weight:600;letter-spacing:-2px;color:#8c959f;margin:0}
+ h1{font-size:20px;margin:8px 0 16px}
+ a{color:#0969da}
 </style></head><body>
-<h1>网页版（Web Vault）没有构建出来</h1>
-<p>后端是正常的 —— 你现在看到的这个页面，就是函数在响应请求。缺的是构建期应当下载到
-<code>public/</code> 的官方网页版静态文件。</p>
-<div class="warn">这不是环境变量写错的问题：<code>WEB_VAULT_ENABLED=true</code> 只决定「构建时要不要下载」，下载失败时不会有运行时开关能补救。</div>
-<p><b>按顺序检查：</b></p>
-<ol>
-  <li>看构建日志里有没有 <code>[web-vault]</code> 开头的行：应当出现下载地址、解压结果和最终文件数；</li>
-  <li>构建机能否访问 GitHub Releases（国内构建机经常超时）；</li>
-  <li>必要时换下载源：<code>WEB_VAULT_BASE_URL</code> 指向一个可达的镜像；</li>
-  <li>改完环境变量必须<b>重新部署</b>（Makers 不热加载）。</li>
-</ol>
-<p><b>现在能用的入口：</b></p>
-<ul>
-  <li><a href="${base}/api/alive">/api/alive</a> — 服务存活</li>
-  <li><a href="${base}/api/config">/api/config</a> — 客户端配置</li>
-  <li><a href="${base}/api/web-status">/api/web-status</a> — 网页版开关状态</li>
-</ul>
-<p>官方客户端（Android / 浏览器扩展）不受影响，可以照常登录使用：在自托管地址里填
-<code>${base}</code> 即可。</p>
+<p class="code">404</p>
+<h1>这个页面不存在</h1>
+<p>地址可能输错了，或者页面已经被移动。</p>
+<p><a href="${base}/">返回密码库</a></p>
 </body></html>`;
-  return c.html(html, 200);
+  return c.html(html, 404);
 }
 
 app.all('*', (c) => {
   const path = new URL(c.req.url).pathname;
   const method = c.req.method;
   const accept = c.req.header('accept') ?? '';
-  // 只把「看起来是在要页面」的请求换成提示页；API 和静态资源仍然返回 501 JSON
+  // 浏览器在要页面 -> HTML 404；接口和静态资源 -> JSON 404（别返回 501，
+  // 那只会在控制台刷一堆「服务器错误」）
+  const hasExt = /\.[a-z0-9]{2,5}$/i.test(path);
+  const isHtmlFile = /\.html?$/i.test(path);
   const pageLike =
     (method === 'GET' || method === 'HEAD') &&
     accept.includes('text/html') &&
     !/\/(api|identity)(\/|$)/.test(path) &&
-    !/\.[a-z0-9]{2,5}$/i.test(path);
-  if (pageLike) return missingWebVaultPage(c);
-  return c.json(
-    {
-      error: 'not_implemented',
-      path,
-      hint: 'route not implemented yet, see README',
-    },
-    501,
-  );
+    (!hasExt || isHtmlFile);
+  if (pageLike) return notFoundPage(c);
+  return c.json({ error: 'not_found', path }, 404, { 'cache-control': 'no-store' });
 });
 
 // 网页版部署在 /vault/ 子路径下时，它在拿到 /api/config 之前会用**相对路径**请求：
@@ -2946,13 +2926,9 @@ app.all('*', (c) => {
 // 把同一套路由再挂一份到 /vault 下即可；拿到 config 后客户端会改用其中的绝对地址。
 const exported = new Hono();
 exported.use('*', cors());
-// 落地页（public/index.html）已删除：根路径直接跳到网页版。
-// 这两条必须注册在下面两个 route() 之前，否则会被 app 里的 all('*') 兜底先命中；
-// 另外它们只挂在 exported 上，不会随 /vault 前缀再挂一次（否则 /vault/ 会自己跳自己）。
-// 网页版直接构建在站点根（public/index.html），静态层会先命中，走不到这里。
-// 走到这里只可能是「产物里没有 index.html」——给说明页，而不是让平台返回 404。
-exported.get('/', (c) => missingWebVaultPage(c));
-exported.get('/index.html', (c) => missingWebVaultPage(c));
+// 网页版直接构建在站点根（public/index.html）。这里不再给 / 和 /index.html 注册
+// 任何特殊处理：构建成功时静态层会先命中，构建失败（或 WEB_VAULT_ENABLED=false）
+// 就让请求落到下面的兜底 404，交给 CDN/平台自己的处理，函数不插手。
 // 旧书签兼容：/vault 与 /vault/index.html 指回根路径（浏览器会保留 #hash）
 exported.get('/vault', (c) => c.redirect('/', 302));
 // 网页版会为每个登录项请求 /icons/{域名}/icon.png 拿网站图标。我们没有这个服务，

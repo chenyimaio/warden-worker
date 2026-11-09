@@ -184,9 +184,9 @@ r = await call('GET', '/api/devices/knowndevice', {
 });
 check('knowndevice = true', r.status === 200 && r.data === true, r);
 
-// 15. 未迁移路由 -> 501
+// 15. 未实现路由 -> 404
 r = await call('GET', '/api/organizations');
-check('未迁移路由返回 501', r.status === 501 && r.data.error === 'not_implemented', r);
+check('未实现路由返回 404', r.status === 404 && r.data.error === 'not_found', r);
 
 // 16. 硬删除
 r = await call('DELETE', `/api/ciphers/${cipherId}`, { token: access });
