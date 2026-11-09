@@ -16099,14 +16099,21 @@ app.post("/api/accounts/password", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
   const authData = p.masterPasswordAuthenticationData ?? {};
   const unlockData = p.masterPasswordUnlockData ?? {};
-  const newMph = String(
+  const explicitNew = String(
     p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? unlockData.masterKeyAuthenticationHash ?? ""
   );
-  if (!newMph) return c.json({ error: "Missing newMasterPasswordHash", message: "Missing newMasterPasswordHash", statusCode: 400 }, 400);
+  const singleHash = String(p.masterPasswordHash ?? "");
+  let newMph = explicitNew;
+  if (explicitNew) {
+    const check = await checkPassword(c, a.user, p);
+    if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
+  } else if (singleHash) {
+    newMph = singleHash;
+  } else {
+    return c.json({ error: "Missing newMasterPasswordHash", message: "Missing newMasterPasswordHash", statusCode: 400 }, 400);
+  }
   const store = getStore2(c.env);
   const salt = randomB64();
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
@@ -16114,7 +16121,12 @@ app.post("/api/accounts/password", async (c) => {
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
   const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.masterKeyEncryptedUserKey ?? unlockData.key ?? null;
   const kdf = unlockData.kdf ?? null;
-  const kdfFields = kdf ? {
+  const kdfFields = p.kdf != null || p.kdfIterations != null ? {
+    kdfType: Number(p.kdf ?? 0),
+    kdfIterations: Number(p.kdfIterations ?? iterations),
+    kdfMemory: p.kdfMemory ?? null,
+    kdfParallelism: p.kdfParallelism ?? null
+  } : kdf ? {
     kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
     kdfIterations: Number(kdf.iterations ?? iterations),
     kdfMemory: kdf.memory ?? null,
@@ -16136,6 +16148,20 @@ app.post("/api/accounts/password", async (c) => {
     } : void 0
   );
   await revokeDevices(store, a.claims.sub);
+  return c.json({});
+});
+app.post("/api/accounts/verify-password", async (c) => {
+  const a = await requireAuth(c);
+  if (a.error) return a.error;
+  const p = await body(c);
+  const authData = p.masterPasswordAuthenticationData ?? {};
+  const mph = String(p.masterPasswordHash ?? authData.masterPasswordAuthenticationHash ?? "");
+  if (!mph) {
+    return c.json({ error: "Missing master password hash", message: "Missing master password hash", statusCode: 400 }, 400);
+  }
+  if (!await checkMasterPassword(c, a.user, mph)) {
+    return c.json({ error: "Invalid password", message: "Invalid password", statusCode: 401 }, 401);
+  }
   return c.json({});
 });
 app.post("/api/accounts/kdf", async (c) => {

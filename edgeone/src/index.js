@@ -1258,25 +1258,34 @@ app.post('/api/accounts/password', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const check = await checkPassword(c, a.user, p);
-  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
 
-  // 新版客户端（Web 2026.x / 移动端）把新密码信息放进 masterPasswordAuthenticationData /
-  // masterPasswordUnlockData，老客户端直接给 newMasterPasswordHash / key。两种都认，
-  // 否则改密会静默失败（客户端以为成功了，服务端还是旧密码，下次登录就报错）。
+  // 客户端有三代写法：
+  //   1. 老客户端：masterPasswordHash=当前 + newMasterPasswordHash=新
+  //   2. 新版 SDK：新密码在 masterPasswordAuthenticationData / masterPasswordUnlockData
+  //   3. 网页版 2026.x（class Gh）：只发一个 masterPasswordHash，它其实是【新】密码，
+  //      当前密码由会话令牌保证（客户端另调 /accounts/verify-password 校验）。
+  // 只认前两种会让第 3 种永远返回 "Missing newMasterPasswordHash"。
   const authData = p.masterPasswordAuthenticationData ?? {};
   const unlockData = p.masterPasswordUnlockData ?? {};
-  // 命名有两代：masterKeyAuthenticationHash（轮换接口用的就是它）、
-  // masterPasswordAuthenticationHash（较新的 SDK）。两个都要认，否则新版网页版
-  // 改密码会被判成「没给新密码」而 400。
-  const newMph = String(
+  const explicitNew = String(
     p.newMasterPasswordHash ??
       p.newMasterPasswordHashB64 ??
       authData.masterPasswordAuthenticationHash ??
       unlockData.masterKeyAuthenticationHash ??
       '',
   );
-  if (!newMph) return c.json({ error: 'Missing newMasterPasswordHash', message: 'Missing newMasterPasswordHash', statusCode: 400 }, 400);
+  const singleHash = String(p.masterPasswordHash ?? '');
+
+  let newMph = explicitNew;
+  if (explicitNew) {
+    // 有独立的新密码字段时，仍要求当前密码正确
+    const check = await checkPassword(c, a.user, p);
+    if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
+  } else if (singleHash) {
+    newMph = singleHash;
+  } else {
+    return c.json({ error: 'Missing newMasterPasswordHash', message: 'Missing newMasterPasswordHash', statusCode: 400 }, 400);
+  }
 
   const store = getStore(c.env);
   const salt = randomB64();
@@ -1292,15 +1301,25 @@ app.post('/api/accounts/password', async (c) => {
 
   // 客户端可能同时换了 KDF：跟着更新，否则 prelogin 会返回旧参数，客户端推导出的
   // masterPasswordHash 永远对不上。
+  // 网页版 2026.x 把 KDF 放在顶层的 kdf / kdfIterations（class Gh 的字段），
+  // 新版 SDK 放在 masterPasswordUnlockData.kdf，两种都读。
   const kdf = unlockData.kdf ?? null;
-  const kdfFields = kdf
-    ? {
-        kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
-        kdfIterations: Number(kdf.iterations ?? iterations),
-        kdfMemory: kdf.memory ?? null,
-        kdfParallelism: kdf.parallelism ?? null,
-      }
-    : {};
+  const kdfFields =
+    p.kdf != null || p.kdfIterations != null
+      ? {
+          kdfType: Number(p.kdf ?? 0),
+          kdfIterations: Number(p.kdfIterations ?? iterations),
+          kdfMemory: p.kdfMemory ?? null,
+          kdfParallelism: p.kdfParallelism ?? null,
+        }
+      : kdf
+        ? {
+            kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
+            kdfIterations: Number(kdf.iterations ?? iterations),
+            kdfMemory: kdf.memory ?? null,
+            kdfParallelism: kdf.parallelism ?? null,
+          }
+        : {};
 
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
@@ -1318,6 +1337,23 @@ app.post('/api/accounts/password', async (c) => {
       : undefined,
   );
   await revokeDevices(store, a.claims.sub);
+  return c.json({});
+});
+
+// 网页版改主密码前会先在这里校验当前密码（然后才 POST /accounts/password）。
+// 不实现的话它拿不到确认，界面会停在通用错误上。
+app.post('/api/accounts/verify-password', async (c) => {
+  const a = await requireAuth(c);
+  if (a.error) return a.error;
+  const p = await body(c);
+  const authData = p.masterPasswordAuthenticationData ?? {};
+  const mph = String(p.masterPasswordHash ?? authData.masterPasswordAuthenticationHash ?? '');
+  if (!mph) {
+    return c.json({ error: 'Missing master password hash', message: 'Missing master password hash', statusCode: 400 }, 400);
+  }
+  if (!(await checkMasterPassword(c, a.user, mph))) {
+    return c.json({ error: 'Invalid password', message: 'Invalid password', statusCode: 401 }, 401);
+  }
   return c.json({});
 });
 
