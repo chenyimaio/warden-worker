@@ -210,7 +210,8 @@ export class BlobStore {
 const instances = new Map();
 
 export function getStore(env) {
-  const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? 'memory';
+  // 默认 blob：线上部署就算漏配也不会静默退化成内存库（本地 dev 由 src/dev.js 显式指定 memory）
+  const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? 'blob';
   if (!instances.has(driver)) {
     instances.set(driver, driver === 'blob' ? new BlobStore(env) : new MemoryStore());
   }

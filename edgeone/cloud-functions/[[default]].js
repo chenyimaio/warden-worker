@@ -14828,7 +14828,7 @@ var BlobStore = class {
 };
 var instances = /* @__PURE__ */ new Map();
 function getStore2(env) {
-  const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? "memory";
+  const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? "blob";
   if (!instances.has(driver)) {
     instances.set(driver, driver === "blob" ? new BlobStore(env) : new MemoryStore());
   }

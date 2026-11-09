@@ -7,7 +7,9 @@
 > EdgeOne 的 Edge Functions 只支持 JS、CPU 200 ms、body 1 MB，没有 SQL、没有 Durable Object、没有 cron，
 > 而 warden-worker 的 `D1 + do + worker-build` 全部依赖这些特性。
 
-[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE)
+[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET)
+
+> 上面这个按钮是 **国内站（console.cloud.tencent.com）**，需要腾讯云账号；国际站（edgeone.ai）的链接见[第二节](#二一键部署)的表格。
 
 ## 目录
 
@@ -44,10 +46,10 @@
 
 | 站点 | 链接 |
 |---|---|
-| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE) |
-| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET%2CSTORE_DRIVER%2CBLOB_STORE) |
+| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET) |
+| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET) |
 
-两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、6 个必需环境变量名。
+两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、**4 个必填环境变量名**（`STORE_DRIVER` 现在可留空，默认 `blob`）。
 
 手动建项目时的构建配置：
 
@@ -81,7 +83,7 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 
 ## 四、环境变量（完整说明）
 
-### 4.1 必填（5 个）
+### 4.1 必填（4 个）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -89,12 +91,12 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 | `ALLOWED_EMAILS` | 无 | 允许注册的邮箱白名单，glob 语法、逗号分隔（如 `me@example.com,*@corp.com`）。**留空 = 关闭注册** |
 | `JWT_SECRET` | 无 | access token 签名密钥，随机 32+ 字节（`openssl rand -hex 32`）。泄露即可伪造登录态 |
 | `JWT_REFRESH_SECRET` | 无 | refresh token 签名密钥，**必须与上面不同** |
-| `STORE_DRIVER` | `memory` | 存储后端：`blob`（线上）/ `memory`（本地调试，进程重启即清空） |
 
 ### 4.2 存储（Blob）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `STORE_DRIVER` | `blob` | 存储后端，**留空即 `blob`**；本地调试可设 `memory`（进程重启即清空，`npm run dev` 会自动使用） |
 | `BLOB_STORE` | `warden` | Blob 命名空间名。首次调用自动创建，免费版 1 GB |
 | `BLOB_PROJECT_ID` | 无 | 仅**外部脚本/CI** 需要（如 `scripts/blob-selftest.mjs`）；函数内自动鉴权 |
 | `BLOB_TOKEN` | 无 | 同上，控制台生成的 API Token |
