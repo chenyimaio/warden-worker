@@ -14896,30 +14896,25 @@ function transport(env) {
 }
 var escapeHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 function passwordHintTemplate({ hint, baseUrl }) {
-  const base = String(baseUrl || "").replace(/\/+$/, "");
   const safeHint = String(hint).slice(0, 1e3);
-  const subject = "\u4E3B\u5BC6\u7801\u63D0\u793A / Your master password hint";
+  const subject = "Vaultwarden\u4E3B\u5BC6\u7801\u63D0\u793A";
   const text = [
     "\u4F60\u597D\uFF0C",
     "",
-    "\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08master password hint\uFF09\uFF1A",
+    "\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF1A",
     "",
     `    ${safeHint}`,
     "",
-    "\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002",
-    "\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\uFF0C\u8D26\u6237\u4E0D\u4F1A\u6709\u4EFB\u4F55\u53D8\u5316\u3002",
+    "\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\u3002",
     "",
-    base ? `\u767B\u5F55\uFF1A${base}` : "",
-    "",
-    "\u2014 Warden"
-  ].filter(Boolean).join("\n");
+    "\u2014 Vaultwarden"
+  ].join("\n");
   const html = `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2328">
 <p>\u4F60\u597D\uFF0C</p>
-<p>\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF08master password hint\uFF09\uFF1A</p>
+<p>\u8FD9\u662F\u4F60\u7684\u5BC6\u7801\u5E93\u4E3B\u5BC6\u7801\u63D0\u793A\uFF1A</p>
 <pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:14px">${escapeHtml(safeHint)}</pre>
-<p style="color:#57606a">\u63D0\u793A\u53EA\u7528\u4E8E\u5E2E\u52A9\u4F60\u56DE\u5FC6\u4E3B\u5BC6\u7801\uFF0C\u4E0D\u4F1A\u6CC4\u9732\u4E3B\u5BC6\u7801\u6216\u4FDD\u9669\u5E93\u5185\u5BB9\u3002\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\u3002</p>
-${base ? `<p><a href="${escapeHtml(base)}">${escapeHtml(base)}</a></p>` : ""}
-<p style="color:#57606a;font-size:13px">\u2014 Warden</p>
+<p style="color:#57606a">\u5982\u679C\u4F60\u6CA1\u6709\u8BF7\u6C42\u8FC7\u8BE5\u63D0\u793A\uFF0C\u8BF7\u5FFD\u7565\u8FD9\u5C01\u90AE\u4EF6\u3002</p>
+<p style="color:#57606a;font-size:13px">\u2014 Vaultwarden</p>
 </div>`;
   return { subject, text, html };
 }
@@ -14932,7 +14927,7 @@ async function sendMail(env, { to, subject, text, html }) {
     console.log("[mail][dry-run]", { to, subject, textLen: text.length });
     return { dryRun: true };
   }
-  const fromName = cfg(env, "MAIL_FROM_NAME", "Warden");
+  const fromName = cfg(env, "MAIL_FROM_NAME", "Vaultwarden");
   const from = cfg(env, "MAIL_FROM");
   const info = await transport(env).sendMail({
     from: `"${fromName}" <${from}>`,

@@ -54,34 +54,27 @@ const escapeHtml = (s) =>
     .replace(/'/g, '&#39;');
 
 export function passwordHintTemplate({ hint, baseUrl }) {
-  const base = String(baseUrl || '').replace(/\/+$/, '');
   const safeHint = String(hint).slice(0, 1000);
-  const subject = '主密码提示 / Your master password hint';
+  const subject = 'Vaultwarden主密码提示';
 
   const text = [
     '你好，',
     '',
-    '这是你的密码库主密码提示（master password hint）：',
+    '这是你的密码库主密码提示：',
     '',
     `    ${safeHint}`,
     '',
-    '提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。',
-    '如果你没有请求过该提示，请忽略这封邮件，账户不会有任何变化。',
+    '如果你没有请求过该提示，请忽略这封邮件。',
     '',
-    base ? `登录：${base}` : '',
-    '',
-    '— Warden',
-  ]
-    .filter(Boolean)
-    .join('\n');
+    '— Vaultwarden',
+  ].join('\n');
 
   const html = `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2328">
 <p>你好，</p>
-<p>这是你的密码库主密码提示（master password hint）：</p>
+<p>这是你的密码库主密码提示：</p>
 <pre style="white-space:pre-wrap;background:#f6f8fa;border-radius:6px;padding:12px;font-size:14px">${escapeHtml(safeHint)}</pre>
-<p style="color:#57606a">提示只用于帮助你回忆主密码，不会泄露主密码或保险库内容。如果你没有请求过该提示，请忽略这封邮件。</p>
-${base ? `<p><a href="${escapeHtml(base)}">${escapeHtml(base)}</a></p>` : ''}
-<p style="color:#57606a;font-size:13px">— Warden</p>
+<p style="color:#57606a">如果你没有请求过该提示，请忽略这封邮件。</p>
+<p style="color:#57606a;font-size:13px">— Vaultwarden</p>
 </div>`;
 
   return { subject, text, html };
@@ -98,7 +91,7 @@ export async function sendMail(env, { to, subject, text, html }) {
     return { dryRun: true };
   }
 
-  const fromName = cfg(env, 'MAIL_FROM_NAME', 'Warden');
+  const fromName = cfg(env, 'MAIL_FROM_NAME', 'Vaultwarden');
   const from = cfg(env, 'MAIL_FROM');
   const info = await transport(env).sendMail({
     from: `"${fromName}" <${from}>`,
