@@ -16101,13 +16101,25 @@ app.post("/api/accounts/password", async (c) => {
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
-  const newMph = String(p.newMasterPasswordHash ?? "");
+  const authData = p.masterPasswordAuthenticationData ?? {};
+  const unlockData = p.masterPasswordUnlockData ?? {};
+  const newMph = String(
+    p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? ""
+  );
   if (!newMph) return c.json({ error: "Missing newMasterPasswordHash" }, 400);
   const store = getStore2(c.env);
   const salt = randomB64();
   const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
+  const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.key ?? null;
+  const kdf = unlockData.kdf ?? null;
+  const kdfFields = kdf ? {
+    kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
+    kdfIterations: Number(kdf.iterations ?? iterations),
+    kdfMemory: kdf.memory ?? null,
+    kdfParallelism: kdf.parallelism ?? null
+  } : {};
   await mutate(
     store,
     keys.profile(a.claims.sub),
@@ -16116,7 +16128,8 @@ app.post("/api/accounts/password", async (c) => {
       masterPasswordHash: hashPassword(newMph, salt, iterations),
       passwordSalt: salt,
       passwordIterations: iterations,
-      key: p.key ?? cur.key,
+      key: newKey ?? cur.key,
+      ...kdfFields,
       ...hintFields ?? {},
       securityStamp: stamp,
       updatedAt: nowIso()

@@ -1258,11 +1258,17 @@ app.post('/api/accounts/password', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  // 诊断：客户端到底有没有带提示字段（只打键名，不打值）
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error }, check.status);
 
-  const newMph = String(p.newMasterPasswordHash ?? '');
+  // 新版客户端（Web 2026.x / 移动端）把新密码信息放进 masterPasswordAuthenticationData /
+  // masterPasswordUnlockData，老客户端直接给 newMasterPasswordHash / key。两种都认，
+  // 否则改密会静默失败（客户端以为成功了，服务端还是旧密码，下次登录就报错）。
+  const authData = p.masterPasswordAuthenticationData ?? {};
+  const unlockData = p.masterPasswordUnlockData ?? {};
+  const newMph = String(
+    p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? '',
+  );
   if (!newMph) return c.json({ error: 'Missing newMasterPasswordHash' }, 400);
 
   const store = getStore(c.env);
@@ -1270,6 +1276,20 @@ app.post('/api/accounts/password', async (c) => {
   const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
+  const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.key ?? null;
+
+  // 客户端可能同时换了 KDF：跟着更新，否则 prelogin 会返回旧参数，客户端推导出的
+  // masterPasswordHash 永远对不上。
+  const kdf = unlockData.kdf ?? null;
+  const kdfFields = kdf
+    ? {
+        kdfType: Number(kdf.kdfType ?? kdf.type ?? 0),
+        kdfIterations: Number(kdf.iterations ?? iterations),
+        kdfMemory: kdf.memory ?? null,
+        kdfParallelism: kdf.parallelism ?? null,
+      }
+    : {};
+
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
@@ -1277,7 +1297,8 @@ app.post('/api/accounts/password', async (c) => {
           masterPasswordHash: hashPassword(newMph, salt, iterations),
           passwordSalt: salt,
           passwordIterations: iterations,
-          key: p.key ?? cur.key,
+          key: newKey ?? cur.key,
+          ...kdfFields,
           ...(hintFields ?? {}),
           securityStamp: stamp,
           updatedAt: nowIso(),
