@@ -463,7 +463,7 @@ app.post('/identity/connect/token', async (c) => {
     const rlIp = await limit(c, 'login-ip', requestIp(c), 60, 60);
     if (rlIp) return rlIp;
     const user = await findUserByEmail(c, email);
-    if (!user) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+    if (!user) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
 
     // login with deviceassword  access code
 const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
@@ -479,10 +479,10 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
         ar.requestDeviceIdentifier !== devId ||
         String(ar.accessCode) !== mph
       ) {
-        return c.json({ error: 'invalid_grant', error_description: 'Username or access code is incorrect. Try again.' }, 400);
+        return c.json({ error: 'invalid_grant', error_description: 'Username or access code is incorrect. Try again.', message: 'Username or access code is incorrect. Try again.', Message: 'Username or access code is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or access code is incorrect. Try again.'] } }, 400);
       }
     } else if (!mph || !(await checkMasterPassword(c, user, mph))) {
-      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
 
     const deviceId = String(p.device_identifier ?? p.deviceIdentifier ?? newId());
@@ -572,15 +572,15 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     try {
       payload = await verifyRefresh(c.env, String(p.refresh_token ?? ''));
     } catch {
-      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
     const device = await store.get(keys.device(String(payload.userId ?? ''), String(payload.deviceId ?? '')));
-    if (!device) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+    if (!device) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     const prof = await store.get(keys.profile(device.value.userId));
-    if (!prof) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+    if (!prof) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     const user = prof.value;
     if (payload.refreshId !== device.value.refreshId || payload.sstamp !== user.securityStamp) {
-      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
     const accessToken = await signAccess(c.env, {
       sub: user.id,
