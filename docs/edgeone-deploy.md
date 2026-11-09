@@ -85,14 +85,13 @@
 
 ## 四、环境变量
 
-### 4.1 必填（4 个）
+### 4.1 必填（3 个）
 
 | 变量 | 说明 | 示例 |
 |---|---|---|
 | `BASE_URL` | 对外访问地址，影响邮件链接和客户端配置 | `https://vault.example.com` |
 | `ALLOWED_EMAILS` | 允许注册的邮箱，glob 写法，逗号分隔；**留空 = 禁止任何人注册** | `me@example.com` 或 `*@example.com` |
-| `JWT_SECRET` | 访问令牌签名密钥，**至少 32 位随机串** | 见下方生成命令 |
-| `JWT_REFRESH_SECRET` | 刷新令牌签名密钥，**必须与上面不同** | 同上 |
+| `JWT_SECRET` | 令牌签名密钥，**至少 32 位随机串** | 见下方生成命令 |
 
 生成密钥：
 
@@ -100,7 +99,11 @@
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-> 一键部署链接只预填这 4 个。`STORE_DRIVER` 留空即 `blob`，`BLOB_STORE` 留空即 `warden`，都不必填。
+> **`JWT_REFRESH_SECRET` 可以不填**。留空时服务端用
+> `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生一个独立的刷新令牌密钥，
+> 两种令牌不能互相冒用。只有需要单独轮换刷新令牌密钥时才显式配置它。
+
+> 一键部署链接只预填上面 3 个。`STORE_DRIVER` 留空即 `blob`，`BLOB_STORE` 留空即 `warden`，都不必填。
 
 ### 4.2 存储
 

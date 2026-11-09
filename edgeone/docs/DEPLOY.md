@@ -41,13 +41,13 @@ npm run test:blob  # Blob 适配契约
 国内站完整链接（可直接用）：
 
 ```
-https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET
+https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET
 ```
 
 如果链接失效，也可以手动建项目，按下表填。两边代码、`edgeone.json`、环境变量完全一样。
 
 ```
-https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET
+https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET
 ```
 
 参数含义：
@@ -94,10 +94,10 @@ OUT=../tmp-bundle.mjs node scripts/build-makes.mjs   # 约 640 KB
 | `BASE_URL` | `https://vault.example.com`（必须与最终域名一致） |
 | `ALLOWED_EMAILS` | `*@example.com`（注册白名单；留空 = 关闭注册） |
 | `JWT_SECRET` | 随机 32+ 字节，例如 `openssl rand -hex 32` |
-| `JWT_REFRESH_SECRET` | 另一个随机 32+ 字节 |
-| `STORE_DRIVER` | `blob` |
-| `BLOB_STORE` | `warden`（首次调用自动创建命名空间） |
+| `STORE_DRIVER` | `blob`（可省，默认 `blob`） |
+| `BLOB_STORE` | `warden`（可省；首次调用自动创建命名空间） |
 | `PASSWORD_ITERATIONS` | `600000`（可省） |
+| `JWT_REFRESH_SECRET` | **可省**。留空时由 `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生；显式配置后从派生切换成显式会让已发出的 refresh token 全部失效 |
 
 邮件是**可选项**：要启用主密码提示邮件，再加 `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `MAIL_FROM`（可选 `MAIL_FROM_NAME`、`MAIL_DRY_RUN`）。不配就静默跳过发信，`/api/accounts/password-hint` 仍返回 200。
 

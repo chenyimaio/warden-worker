@@ -14549,8 +14549,13 @@ function verifyPassword(storedHash, salt, iterations, candidate) {
   const b = Buffer.from(hashPassword(candidate, salt, iterations), "base64");
   return a.length === b.length && timingSafeEqual2(a, b);
 }
+var REFRESH_SECRET_LABEL = "warden/v1/refresh-token-signing-key";
 function secret(env, name) {
-  const v = env?.[name] ?? process.env[name];
+  let v = env?.[name] ?? process.env[name];
+  if (!v && name === "JWT_REFRESH_SECRET") {
+    const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+    if (base) v = createHmac2("sha256", base).update(REFRESH_SECRET_LABEL).digest("base64url");
+  }
   if (!v) throw new Error(`missing secret: ${name}`);
   return new TextEncoder().encode(v);
 }

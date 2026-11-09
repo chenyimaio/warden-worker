@@ -7,7 +7,7 @@
 > EdgeOne 的 Edge Functions 只支持 JS、CPU 200 ms、body 1 MB，没有 SQL、没有 Durable Object、没有 cron，
 > 而 warden-worker 的 `D1 + do + worker-build` 全部依赖这些特性。
 
-<a href="https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET"><img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Makers 部署（国内站）" height="36"></a>&nbsp;&nbsp;<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET"><img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Makers 部署（国际站）" height="36"></a>
+<a href="https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET"><img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Makers 部署（国内站）" height="36"></a>&nbsp;&nbsp;<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET"><img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Makers 部署（国际站）" height="36"></a>
 
 <sub>左：国内站 console.cloud.tencent.com　·　右：国际站 edgeone.ai</sub>
 
@@ -46,10 +46,10 @@
 
 | 站点 | 链接 |
 |---|---|
-| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET) |
-| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET%2CJWT_REFRESH_SECRET) |
+| 国内站 | [一键部署（console.cloud.tencent.com）](https://console.cloud.tencent.com/edgeone/pages/new?project-name=warden-edgeone&repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&build-command=npm%20run%20build&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET) |
+| 国际站 | [一键部署（edgeone.ai）](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2Fchenyimaio%2Fwarden-worker%2Ftree%2Fedgeone&root-directory=edgeone&install-command=npm%20ci&env=BASE_URL%2CALLOWED_EMAILS%2CJWT_SECRET) |
 
-两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、**4 个必填环境变量名**（`STORE_DRIVER` 现在可留空，默认 `blob`）。
+两个链接都会预填：仓库/分支 `edgeone`、根目录 `edgeone`、安装 `npm ci`、构建 `npm run build`、**3 个必填环境变量名**（`STORE_DRIVER` 现在可留空，默认 `blob`）。
 
 手动建项目时的构建配置：
 
@@ -83,14 +83,17 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 
 ## 四、环境变量（完整说明）
 
-### 4.1 必填（4 个）
+### 4.1 必填（3 个）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BASE_URL` | 无 | 对外访问地址，**必须与最终域名一致**。文件 Send 的下载链接、附件 url 都基于它 |
 | `ALLOWED_EMAILS` | 无 | 允许注册的邮箱白名单，glob 语法、逗号分隔（如 `me@example.com,*@corp.com`）。**留空 = 关闭注册** |
-| `JWT_SECRET` | 无 | access token 签名密钥，随机 32+ 字节（`openssl rand -hex 32`）。泄露即可伪造登录态 |
-| `JWT_REFRESH_SECRET` | 无 | refresh token 签名密钥，**必须与上面不同** |
+| `JWT_SECRET` | 无 | access / refresh 令牌签名密钥，随机 32+ 字节（`openssl rand -hex 32`）。泄露即可伪造登录态 |
+
+> `JWT_REFRESH_SECRET` **可以不填**：留空时用 `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生，
+> 两种令牌拿到的密钥互不相同，access 与 refresh 不能互相冒用（已有测试覆盖）。
+> 想单独轮换刷新令牌密钥时才需要显式配置它 —— 注意从「派生」切换到「显式」会让所有已发出的 refresh token 失效，用户需重新登录一次。
 
 ### 4.2 存储（Blob）
 
@@ -105,6 +108,7 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `JWT_REFRESH_SECRET` | 由 `JWT_SECRET` 派生 | 刷新令牌签名密钥。**留空即可**，服务端用 `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生出一个独立密钥；只有需要单独轮换它时才填 |
 | `PASSWORD_ITERATIONS` | `600000` | 服务端对客户端 `masterPasswordHash` 再套一层 PBKDF2 时的迭代次数。改大更慢更安全，**改小会让老账号登录失败** |
 | `ALLOW_TOTP_DRIFT` | `true` | TOTP 是否允许 ±1 个时间步的时钟漂移。`false` 更严格，但客户端时钟偏差会导致验证失败 |
 | `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | **所有上传/下载的硬上限**（文件 Send 与条目附件共用）。超过时创建阶段直接 413 |

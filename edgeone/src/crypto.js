@@ -29,8 +29,17 @@ export function verifyPassword(storedHash, salt, iterations, candidate) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// 刷新令牌的签名密钥可以从 JWT_SECRET 派生：用带标签的 HMAC-SHA256 做密钥分离，
+// 两个用途拿到的是互不相同的密钥，安全性不低于手工填第二个随机串。
+// 显式配置 JWT_REFRESH_SECRET 时以它为准（便于轮换，或从旧部署平滑迁移）。
+const REFRESH_SECRET_LABEL = 'warden/v1/refresh-token-signing-key';
+
 function secret(env, name) {
-  const v = env?.[name] ?? process.env[name];
+  let v = env?.[name] ?? process.env[name];
+  if (!v && name === 'JWT_REFRESH_SECRET') {
+    const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+    if (base) v = createHmac('sha256', base).update(REFRESH_SECRET_LABEL).digest('base64url');
+  }
   if (!v) throw new Error(`missing secret: ${name}`);
   return new TextEncoder().encode(v);
 }
