@@ -52,6 +52,15 @@ const maskEmail = (addr) => {
   if (at <= 0) return s ? '***' : '';
   return `${s.slice(0, 1)}***${s.slice(at)}`;
 };
+
+// 发件地址来自环境变量，仍要挡住头注入：CR/LF 会插入额外头（Bcc），
+// 尖括号/引号会破坏 `"Name" <addr>` 的结构。
+const isSafeMailAddress = (addr) => {
+  const s = String(addr ?? '');
+  if (!s || s.length > 254) return false;
+  if (/[\r\n<>",;]/.test(s)) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+};
 const escapeHtml = (s) =>
   String(s)
     .replace(/&/g, '&amp;')
@@ -90,7 +99,7 @@ export function passwordHintTemplate({ hint, baseUrl }) {
 /** 通用发送；未配置时静默跳过，dry-run 时只打日志 */
 export async function sendMail(env, { to, subject, text, html }) {
   if (!mailConfigured(env)) {
-    console.warn('[mail] not configured (SMTP_HOST / MAIL_FROM missing), skipped:', subject, '->', to);
+    console.warn('[mail] not configured (SMTP_HOST / MAIL_FROM missing), skipped:', subject, '->', maskEmail(to));
     return { skipped: true };
   }
   if (String(cfg(env, 'MAIL_DRY_RUN', 'false')).toLowerCase() === 'true') {
@@ -100,8 +109,15 @@ export async function sendMail(env, { to, subject, text, html }) {
 
   const fromName = cfg(env, 'MAIL_FROM_NAME', 'Vaultwarden');
   const from = cfg(env, 'MAIL_FROM');
+  // MAIL_FROM / MAIL_FROM_NAME 是环境变量，正常由属主配置；但仍要防注入 ——
+  // 一旦值里带 CR/LF 或尖括号，就能往邮件头里插入额外收件人（Bcc）。
+  if (!isSafeMailAddress(from)) {
+    console.error('[mail] MAIL_FROM is not a valid address, skipped');
+    return { skipped: true };
+  }
+  const safeName = String(fromName).replace(/[\r\n"<>]/g, '').slice(0, 120);
   const info = await transport(env).sendMail({
-    from: `"${fromName}" <${from}>`,
+    from: safeName ? `"${safeName}" <${from}>` : from,
     to,
     subject,
     text,

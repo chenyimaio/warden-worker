@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // scripts/repair-profile.mjs —— 修复被手工改坏的 profile 对象
 //
+// ⚠️ 凭据等级：需要 BLOB_TOKEN，等价于对 Blob 的完全读写权限 ——
+//    能改任意账号的 profile（包括提示与密钥材料）。仅限运维排查时临时使用。
+//
 // 典型症状：
 //   - 提示值挂在空字符串键上：  "passwordIterations":600000,"":"123"
 //   - 字段名被误敲进值里：      "updatedAt":"2026-11-07T1masterPasswordHint4:02:08.311Z"

@@ -42,7 +42,7 @@ const call = async (method, path, { body, form, raw, multipart, token, headers =
   } catch {
     data = text;
   }
-  return { status: res.status, data, rawText: text };
+  return { status: res.status, data, rawText: text, headers: res.headers };
 };
 
 const check = (name, cond, extra) => {
@@ -1128,7 +1128,7 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
     });
     attacker.push(x.status);
   }
-  check('第三方同 IP 连打 12 次错口令 -> 后段被限速', attacker.slice(-1)[0] === 401 && attacker.includes(401), attacker);
+  check('第三方同 IP 连打 12 次错口令 -> 后段被 429 限速', attacker.slice(-1)[0] === 429 && attacker.includes(429), attacker);
 
   // 关键：另一个 IP 用正确口令必须仍然放行（不能被第三方锁死）
   r = await call('POST', `/api/sends/access/${pwAccess}`, {
@@ -1144,7 +1144,7 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
     body: { password: 'letmein' },
     headers: { 'eo-connecting-ip': '10.9.9.9' },
   });
-  check('打满的 IP 在窗口内被限速（范围仅限该 IP + 该 Send）', r.status === 401 && /Too many/i.test(String(r.data?.error ?? '')), r);
+  check('打满的 IP 在窗口内被 429 限速（范围仅限该 IP + 该 Send）', r.status === 429 && /Too many/i.test(String(r.data?.error ?? '')), r);
 }
 
 // 33. 安全回归（第六轮）：密钥轮换必须是全有或全无，不能半轮换丢数据
@@ -1271,6 +1271,89 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   r = await call('GET', '/api/sends', { token: tokAfter });
   const rotSend = (r.data?.data ?? [])[0];
   check('轮换后 send akey 已更新', rotSend?.key === '2.NEW-AKEY', rotSend);
+}
+
+// 34. 安全回归（第七轮）：N-6 槽位放大 + 7 项低危
+{
+  // N-6：软上限触发后必须立即返回 429，不能 sleep 占住并发槽
+  const mkUser = async (tag) => {
+    const addr = `${tag}-${Date.now()}@example.com`;
+    await call('POST', '/api/accounts/register', {
+      body: {
+        email: addr, masterPasswordHash: `${tag}-mph`, userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    return { addr, tok: (await call('POST', '/identity/connect/token', {
+      form: {
+        grant_type: 'password', username: addr, password: `${tag}-mph`, scope: 'api offline_access',
+        client_id: 'web', deviceType: '10', deviceIdentifier: `dev-${tag}`, deviceName: tag,
+      },
+    })).data?.access_token };
+  };
+  const u = await mkUser('n6');
+  const dd = new Date(Date.now() + 86400e3).toISOString();
+  r = await call('POST', '/api/sends', {
+    token: u.tok,
+    body: { type: 0, key: 'k', name: 'slow', text: { text: 'x' }, deletionDate: dd, password: 'right' },
+  });
+  const slowAccess = r.data?.accessId;
+
+  // 打满单 Send 累计失败（50 次）：30 个 IP × 2 次
+  for (let i = 0; i < 25; i++) {
+    for (let j = 0; j < 2; j++) {
+      await call('POST', `/api/sends/access/${slowAccess}`, {
+        body: { password: `x${i}_${j}` },
+        headers: { 'eo-connecting-ip': `10.2.${i}.${j}` },
+      });
+    }
+  }
+  const t0 = Date.now();
+  r = await call('POST', `/api/sends/access/${slowAccess}`, {
+    body: { password: 'nope' },
+    headers: { 'eo-connecting-ip': '10.9.9.9' },
+  });
+  const elapsed = Date.now() - t0;
+  check('软上限触发后立即 429（不 sleep）', r.status === 429 && elapsed < 200, { status: r.status, elapsed });
+
+  // 6 并发必须几乎同时完成（若每个占 600ms，总耗时会到 600ms+）
+  const t1 = Date.now();
+  const par = await Promise.all([0, 1, 2, 3, 4, 5].map((i) =>
+    call('POST', `/api/sends/access/${slowAccess}`, {
+      body: { password: `c${i}` },
+      headers: { 'eo-connecting-ip': `10.8.8.${i}` },
+    }),
+  ));
+  const parMs = Date.now() - t1;
+  check('6 并发软上限请求总耗时 < 400ms（不占槽）', parMs < 400 && par.every((x) => x.status === 429), { parMs, codes: par.map((x) => x.status) });
+
+  // 软上限后正确口令仍放行
+  r = await call('POST', `/api/sends/access/${slowAccess}`, {
+    body: { password: 'right' },
+    headers: { 'eo-connecting-ip': '10.7.7.7' },
+  });
+  check('软上限触发后正确口令仍 200', r.status === 200, r);
+
+  // L-17：附件下载不声明 content-length，且字节正确
+  r = await call('POST', '/api/ciphers', { token: u.tok, body: { type: 2, name: 'f', secureNote: { type: 0 } } });
+  const attCipher = r.data?.id;
+  r = await call('POST', `/api/ciphers/${attCipher}/attachment/v2`, {
+    token: u.tok,
+    body: { key: '2.akey|iv|ct', fileName: 'a.bin', fileSize: 3, adminRequest: false },
+  });
+  const attId = r.data?.attachmentId;
+  const upPath = String(r.data?.url ?? '').replace(/^https?:\/\/[^/]+/, '');
+  r = await call('PUT', upPath, { token: u.tok, raw: Buffer.from('XYZ') });
+  check('附件上传(PUT) -> 200', r.status === 200, r);
+  r = await call('GET', `/api/ciphers/${attCipher}/attachment/${attId}`, { token: u.tok });
+  const dlPath = String(r.data?.url ?? '').replace(/^https?:\/\/[^/]+/, '');
+  r = await call('GET', dlPath, { token: u.tok });
+  check(
+    '附件下载不设 content-length（避免声明错误的长度）',
+    r.headers?.get?.('content-length') === null,
+    r.headers?.get?.('content-length'),
+  );
+  check('附件下载字节正确', r.rawText === 'XYZ' || r.data === 'XYZ' || String(r.rawText) === 'XYZ', r.rawText);
 }
 
 const failed = results.filter((x) => !x.ok);

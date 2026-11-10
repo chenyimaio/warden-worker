@@ -401,6 +401,61 @@ if (fails >= SEND_PW_SOFT_CAP) { await sleep(600); return { ok:false, coolingDow
 > 为什么不直接硬锁：N-4 的教训就是硬锁会让第三方锁死他人的链接。
 > 软上限只作用于错误口令，接收方知道口令就永远进得去。
 
+---
+
+## 十七、N-6：软上限的 sleep 变成了并发槽放大器（我引入的）
+
+### 实测
+
+```
+软上限前 单次错口令: 13ms
+软上限后 单次错口令: 632ms      ← 每个请求占住并发槽 630ms
+6 并发: [631ms,401] ×6, 总耗时 647ms
+```
+
+平台单实例并发 20，于是占满槽位只需要 **~33 req/s**（此前要 ~1540 req/s）。
+等于把「CPU 爆破」换成了「并发槽耗尽」，成本反而更低。
+
+### 修法
+
+`await sleep(600)` 换成**立即 429 + Retry-After**，并把 `status`/`retryAfter` 透传给 4 个调用点：
+
+```js
+if (fails >= SEND_PW_SOFT_CAP) {
+  return { ok: false, coolingDown: true, status: 429, retryAfter: 60, error: '...' };
+}
+```
+
+### 实测（修后）
+
+```
+软上限后单次: 12ms status=429 retry-after=60
+6 并发: [16ms,429] [15ms,429] [15ms,429] [15ms,429] [28ms,429] [28ms,429]
+6 并发总耗时: 28ms     ← 从 647ms 降下来，不再占槽
+软上限后正确口令 -> 200
+```
+
+---
+
+## 十八、七项低危复核
+
+| 编号 | 复核结论 | 处置 |
+|---|---|---|
+| **L-17** 流式下载 `content-length` 取自 `head()` | **成立**。根因在 `MemoryStore.head()`：二进制返回 `JSON.stringify(buffer).length`，3 字节变 35。线上 Blob 走元数据所以正常，但一旦偏差就截断/挂起 | `head()` 区分 Buffer 与 JSON 返回真实字节数；流式分支**不再设** `content-length`（chunked 传输没有这个风险）。实测下载 3 字节、无该头、内容正确 |
+| **L-18** 未配置分支打印完整邮箱 + `from` 可污染邮件头 | **成立** | 未配置分支改用 `maskEmail`；新增 `isSafeMailAddress()` 挡住 CR/LF 与尖括号，`MAIL_FROM_NAME` 剔除 `"<>` 并截断 120 字符 |
+| **L-19** TOTP 用 `===`；`ALLOW_TOTP_DRIFT` 默认 true | **成立** | 改用 `safeEqual`。`validateTotp` 的 `step <= lastUsed` 已经防重放，漂移窗口是可配置项，保留默认 `true` 以兼容时钟偏差，已在 README 表格写明 |
+| **L-20** `sealSecret` 密钥由 `JWT_SECRET` 派生 | **成立且后果严重**：轮换 `JWT_SECRET` 后所有已存恢复码失效，而 2FA 还开着 → 用户被永久锁在门外 | 新增 `SECRET_ENCRYPTION_KEY`（≥32 字符），优先使用；未配置时退回 `JWT_SECRET` 保持兼容。实测：轮换 `JWT_SECRET` + 保留 `SECRET_ENCRYPTION_KEY` → 旧恢复码仍可解密 |
+| **L-21** `store.list()` 忽略分页 | **误报**。`@edgeone/pages-blob` 的 `ListOptions.paginate` **默认 `true`**，SDK 内部自动聚合全部页（见 `index.d.ts:54-55`） | 不改。已在复核记录中说明依据 |
+| **L-22** 运维脚本持有 `BLOB_TOKEN` | **成立**（属凭据等级问题，不是漏洞） | `set-hint` / `peek-profile` / `repair-profile` 三个脚本头部加统一警示：等价于 Blob 完全读写权限、能读任意账号哈希与明文提示、仅限临时运维使用 |
+| **L-23** 附件票据用 `:` 拼接再 `split` | **成立**（当前字段都是 UUID 所以安全，但脆弱） | 改成 JSON payload（`{u,a,e,s}`），并**保留旧格式解析**平滑过渡。实测新票据可解析、旧票据仍可用、过期票据返回 null |
+| **L-24** `getStore` 缓存只按 driver 名 | **成立**：同进程多 project 时第二个实例会拿到第一个的 `BlobStore`，读写到错误的库 | 缓存键改为 `driver:projectId:storeName` |
+
+> L-17 复核时踩了个测试自身的坑：先用 `POST .../data` 上传，路由其实是 `PUT`，
+> 结果 404 被误读成「下载坏了」。和之前 bulk 路由用错方法同一类错误 —— 复核脚本本身也要核对方法。
+
+新增回归（smoke 第 34 节，共 6 条）：软上限触发后立即 429 且 <200ms、6 并发总耗时 <400ms、软上限后正确口令仍 200、附件上传 200、下载不设 content-length、下载字节正确。
+
+
 
 
 

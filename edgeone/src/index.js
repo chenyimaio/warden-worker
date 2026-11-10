@@ -899,15 +899,20 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
       }));
       return c.json({ error: 'invalid_grant', send_access_error_type: 'unavailable' }, 400);
     }
-    if (sendHasPassword(send) && !(await verifySendPassword(c, store, send, provided)).ok) {
-      console.warn('[send-access] password required/invalid');
-      return c.json(
-        {
-          error: 'invalid_grant',
-          send_access_error_type: provided ? 'password_hash_b64_invalid' : 'password_hash_b64_required',
-        },
-        400,
-      );
+    if (sendHasPassword(send)) {
+      const pw = await verifySendPassword(c, store, send, provided);
+      if (!pw.ok) {
+        console.warn('[send-access] password required/invalid');
+        const hdr = pw.retryAfter ? { 'retry-after': String(pw.retryAfter) } : {};
+        return c.json(
+          {
+            error: 'invalid_grant',
+            send_access_error_type: provided ? 'password_hash_b64_invalid' : 'password_hash_b64_required',
+          },
+          pw.status ?? 400,
+          hdr,
+        );
+      }
     }
     // 访问计数是「尽力而为」：乐观锁冲突重试耗尽会抛异常，
     // 以前这里没人捕获 → 整条请求 500（页面就显示"发生意外错误"）。
@@ -1843,17 +1848,13 @@ const baseUrlOf = (c) => String(envGet(c, 'BASE_URL', new URL(c.req.url).origin)
  * 流式不可用时退回一次性缓冲，行为与以前一致。
  */
 async function streamBinary(c, store, key, contentType = 'application/octet-stream', extraHeaders = {}) {
-  let size = 0;
-  try {
-    size = (await store.head(key))?.size ?? 0;
-  } catch {
-    /* 拿不到大小就按 chunked 返回 */
-  }
   try {
     const stream = await store.getStream(key);
     if (stream) {
+      // 故意不设 content-length：head() 给出的大小来自元数据，一旦和真实字节
+      // 有任何偏差，客户端就会截断或挂起。chunked 传输没有这个问题，
+      // 下载功能本身也不依赖声明大小。
       const headers = { ...extraHeaders, 'content-type': contentType, 'cache-control': 'no-store' };
-      if (size) headers['content-length'] = String(size);
       return c.body(stream, 200, headers);
     }
   } catch (e) {
@@ -2139,10 +2140,13 @@ async function checkSendPassword(s, candidate) {
 // send.failedAttempts 仍然记录，供属主判断"这条链接正在被爆破"。
 const SEND_PW_MAX_FAILS_PER_MIN = 10;
 const SEND_PW_SUSPICIOUS_AFTER = 5;
-// 单条 Send 的累计失败软上限：到线后给「错误口令」加延迟，把跨 IP 的爆破速率压下来。
-// 注意**正确口令不受影响** —— 上一版按 Send 硬锁会让人 5 次错口令就锁死别人的链接。
+// 单条 Send 的累计失败软上限：到线后错误口令直接 429 并给 Retry-After。
+// 这里**绝不能 sleep** —— 平台单实例并发只有 20，每个请求睡 600ms 等于把
+// 「CPU 爆破」换成「并发槽耗尽」：33 req/s 就能让整个实例排队。
+// 立即返回才能让请求马上释放槽位。
+// 正确口令走上面的分支，永远放行。
 const SEND_PW_SOFT_CAP = 50;
-const SEND_PW_COOLDOWN_DELAY_MS = 600;
+const SEND_PW_COOLDOWN_SEC = 60;
 
 async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
@@ -2157,7 +2161,7 @@ async function verifySendPassword(c, store, send, candidate) {
   const cur = (await store.get(bucketKey))?.value;
   const sameWindow = cur && now - cur.start < windowMs;
   if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
-    return { ok: false, throttled: true, error: 'Too many attempts. Try again later.' };
+    return { ok: false, throttled: true, status: 429, retryAfter: SEND_PW_COOLDOWN_SEC, error: 'Too many attempts. Try again later.' };
   }
 
   if (await checkSendPassword(send, candidate)) {
@@ -2181,10 +2185,13 @@ async function verifySendPassword(c, store, send, candidate) {
   ).catch(() => {});
 
   if (fails >= SEND_PW_SOFT_CAP) {
-    // 软上限：只拖慢错误口令。跨 IP 的爆破会在这里被整体降速，
-    // 而拿到正确口令的接收方走的是上面那条分支，完全不受影响。
-    await new Promise((r) => setTimeout(r, SEND_PW_COOLDOWN_DELAY_MS));
-    return { ok: false, coolingDown: true, error: 'Too many failed attempts on this link' };
+    return {
+      ok: false,
+      coolingDown: true,
+      status: 429,
+      retryAfter: SEND_PW_COOLDOWN_SEC,
+      error: 'Too many failed attempts on this link',
+    };
   }
   return {
     ok: false,
@@ -2427,7 +2434,10 @@ app.post('/api/sends/access/:accessId', async (c) => {
   const password = p.password ?? p.passwordHash ?? null;
   if (sendHasPassword(send)) {
     const pw = await verifySendPassword(c, store, send, password);
-    if (!pw.ok) return c.json({ error: pw.error }, 401);
+    if (!pw.ok) {
+      const hdr = pw.retryAfter ? { 'retry-after': String(pw.retryAfter) } : {};
+      return c.json({ error: pw.error }, pw.status ?? 401, hdr);
+    }
   }
 
   try {
@@ -2526,7 +2536,9 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
     const inline = p.password ?? p.passwordHash ?? null;
     const pw = await verifySendPassword(c, store, send, inline);
     if (!pw.ok) {
-      return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
+      const hdr = pw.retryAfter ? { 'retry-after': String(pw.retryAfter) } : {};
+      const code = pw.status ?? 401;
+      return c.json({ error: pw.error, message: pw.error, statusCode: code }, code, hdr);
     }
   }
 
@@ -2828,7 +2840,10 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send)) {
     const pw = await verifySendPassword(c, store, send, p.password ?? null);
-    if (!pw.ok) return c.json({ error: pw.error }, 401);
+    if (!pw.ok) {
+      const hdr = pw.retryAfter ? { 'retry-after': String(pw.retryAfter) } : {};
+      return c.json({ error: pw.error }, pw.status ?? 401, hdr);
+    }
   }
 
   try {

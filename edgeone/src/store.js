@@ -64,7 +64,14 @@ export class MemoryStore {
 
   async head(key) {
     const v = this.#m.get(key);
-    return v ? { etag: v.etag, size: JSON.stringify(v.value ?? '').length } : null;
+    if (!v) return null;
+    // 必须返回**真实字节数**：二进制通道存的是 Buffer，JSON.stringify 出来的是
+    // {"type":"Buffer","data":[...]}，长度和实际字节差一个数量级。
+    // 下载时拿它当 Content-Length 会声明错误大小，客户端要么截断要么挂起。
+    const size = Buffer.isBuffer(v.value)
+      ? v.value.length
+      : Buffer.byteLength(JSON.stringify(v.value ?? ''), 'utf8');
+    return { etag: v.etag, size };
   }
 
   async put(key, value, opts = {}) {
@@ -212,10 +219,16 @@ const instances = new Map();
 export function getStore(env) {
   // 默认 blob：线上部署就算漏配也不会静默退化成内存库（本地 dev 由 src/dev.js 显式指定 memory）
   const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? 'blob';
-  if (!instances.has(driver)) {
-    instances.set(driver, driver === 'blob' ? new BlobStore(env) : new MemoryStore());
+  // 缓存键不能只有 driver：同一进程里跑多个 project（多租户测试、dev 与 prod 并存）
+  // 时，第二个实例会拿到第一个实例的 BlobStore，进而读写到错误的库。
+  // 把真正决定目标库的字段一起编进键里。
+  const storeName = env?.BLOB_STORE ?? process.env.BLOB_STORE ?? 'warden';
+  const projectId = env?.BLOB_PROJECT_ID ?? process.env.BLOB_PROJECT_ID ?? '';
+  const cacheKey = driver === 'blob' ? `${driver}:${projectId}:${storeName}` : driver;
+  if (!instances.has(cacheKey)) {
+    instances.set(cacheKey, driver === 'blob' ? new BlobStore(env) : new MemoryStore());
   }
-  return instances.get(driver);
+  return instances.get(cacheKey);
 }
 
 /**

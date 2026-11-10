@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // scripts/set-hint.mjs —— 直接改某个账号的「主密码提示」（不走业务接口，改完立即生效）
 //
+// ⚠️ 凭据等级：本脚本需要 BLOB_TOKEN，等价于对 Blob 的完全读写权限 ——
+//    持有它就能读任意账号的 masterPasswordHash、明文提示、加密后的密钥材料。
+//    只在运维排查时临时使用，不要放进 CI、不要提交 token、用完即弃。
+//    schema 升级后这个脚本也需要跟着改，属于「运维特权工具」而非普通脚本。
+//
 // 用法（外部访问模式，需要控制台生成 API Token）：
 //   BLOB_PROJECT_ID=pages-xxxx BLOB_TOKEN=xxx \
 //     node scripts/set-hint.mjs <邮箱> <新的提示>

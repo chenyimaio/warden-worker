@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // scripts/peek-profile.mjs —— 打印某个账号在 Blob 里的原始 profile JSON
 //
+// ⚠️ 凭据等级：需要 BLOB_TOKEN，等价于对 Blob 的完全读写权限 ——
+//    能读任意账号的 masterPasswordHash、明文提示与加密密钥材料。
+//    仅限运维排查时临时使用，不要把 token 放进 CI 或提交进仓库。
+//
 // 用法：
 //   BLOB_PROJECT_ID=pages-xxxx BLOB_TOKEN=xxx node scripts/peek-profile.mjs <邮箱>
 //

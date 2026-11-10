@@ -14594,7 +14594,7 @@ async function verifyRemember(env, token) {
 var ATT_TTL_SEC = 600;
 function makeAttachmentToken(env, { uid, aid, sstamp = "-", ttl = ATT_TTL_SEC }) {
   const exp = Math.floor(Date.now() / 1e3) + ttl;
-  const payload = Buffer.from(`${uid}:${aid}:${exp}:${sstamp}`).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ u: uid, a: aid, e: exp, s: sstamp })).toString("base64url");
   const sig = createHmac2("sha256", secret(env, "JWT_SECRET")).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -14607,6 +14607,16 @@ function verifyAttachmentToken(env, token) {
   const b = Buffer.from(expect);
   if (a.length !== b.length || !timingSafeEqual2(a, b)) return null;
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
+  if (decoded.startsWith("{")) {
+    try {
+      const o = JSON.parse(decoded);
+      if (!o?.u || !o?.a || o?.e == null) return null;
+      if (Number(o.e) < Math.floor(Date.now() / 1e3)) return null;
+      return { uid: String(o.u), aid: String(o.a), sstamp: o.s == null ? "-" : String(o.s) };
+    } catch {
+      return null;
+    }
+  }
   const [uid, aid, expStr, sstamp] = decoded.split(":");
   if (!uid || !aid || !expStr) return null;
   if (Number(expStr) < Math.floor(Date.now() / 1e3)) return null;
@@ -14695,7 +14705,7 @@ function validateTotp(code, secretB32, lastUsed = 0, allowDrift = false) {
   for (let off = -drift; off <= drift; off++) {
     const step = currentStep + off;
     if (step <= lastUsed) continue;
-    if (totpAt(secretB32, step) === String(code)) return step;
+    if (safeEqual(totpAt(secretB32, step), String(code))) return step;
   }
   throw new Error("Invalid TOTP code");
 }
@@ -14707,7 +14717,7 @@ function safeEqual(a, b) {
 var SEAL_LABEL = "warden/v1/field-encryption";
 var SEAL_PREFIX = "enc:v1:";
 function sealKey(env) {
-  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  const base = env?.SECRET_ENCRYPTION_KEY ?? process.env.SECRET_ENCRYPTION_KEY ?? env?.JWT_SECRET ?? process.env.JWT_SECRET;
   if (!base) throw new Error("missing secret: JWT_SECRET");
   return createHash("sha256").update(`${SEAL_LABEL}:${base}`).digest();
 }
@@ -14778,7 +14788,9 @@ var MemoryStore = class {
   }
   async head(key) {
     const v = this.#m.get(key);
-    return v ? { etag: v.etag, size: JSON.stringify(v.value ?? "").length } : null;
+    if (!v) return null;
+    const size = Buffer.isBuffer(v.value) ? v.value.length : Buffer.byteLength(JSON.stringify(v.value ?? ""), "utf8");
+    return { etag: v.etag, size };
   }
   async put(key, value, opts = {}) {
     const cur = this.#m.get(key);
@@ -14880,10 +14892,13 @@ var BlobStore = class {
 var instances = /* @__PURE__ */ new Map();
 function getStore2(env) {
   const driver = env?.STORE_DRIVER ?? process.env.STORE_DRIVER ?? "blob";
-  if (!instances.has(driver)) {
-    instances.set(driver, driver === "blob" ? new BlobStore(env) : new MemoryStore());
+  const storeName = env?.BLOB_STORE ?? process.env.BLOB_STORE ?? "warden";
+  const projectId = env?.BLOB_PROJECT_ID ?? process.env.BLOB_PROJECT_ID ?? "";
+  const cacheKey = driver === "blob" ? `${driver}:${projectId}:${storeName}` : driver;
+  if (!instances.has(cacheKey)) {
+    instances.set(cacheKey, driver === "blob" ? new BlobStore(env) : new MemoryStore());
   }
-  return instances.get(driver);
+  return instances.get(cacheKey);
 }
 async function mutate(store, key, fn, { retries = 5 } = {}) {
   const conditional = store.supportsConditional !== false;
@@ -14951,6 +14966,12 @@ var maskEmail = (addr) => {
   if (at <= 0) return s ? "***" : "";
   return `${s.slice(0, 1)}***${s.slice(at)}`;
 };
+var isSafeMailAddress = (addr) => {
+  const s = String(addr ?? "");
+  if (!s || s.length > 254) return false;
+  if (/[\r\n<>",;]/.test(s)) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+};
 var escapeHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 function passwordHintTemplate({ hint, baseUrl }) {
   const safeHint = String(hint).slice(0, 1e3);
@@ -14977,7 +14998,7 @@ function passwordHintTemplate({ hint, baseUrl }) {
 }
 async function sendMail(env, { to, subject, text, html }) {
   if (!mailConfigured(env)) {
-    console.warn("[mail] not configured (SMTP_HOST / MAIL_FROM missing), skipped:", subject, "->", to);
+    console.warn("[mail] not configured (SMTP_HOST / MAIL_FROM missing), skipped:", subject, "->", maskEmail(to));
     return { skipped: true };
   }
   if (String(cfg(env, "MAIL_DRY_RUN", "false")).toLowerCase() === "true") {
@@ -14986,8 +15007,13 @@ async function sendMail(env, { to, subject, text, html }) {
   }
   const fromName = cfg(env, "MAIL_FROM_NAME", "Vaultwarden");
   const from = cfg(env, "MAIL_FROM");
+  if (!isSafeMailAddress(from)) {
+    console.error("[mail] MAIL_FROM is not a valid address, skipped");
+    return { skipped: true };
+  }
+  const safeName = String(fromName).replace(/[\r\n"<>]/g, "").slice(0, 120);
   const info = await transport(env).sendMail({
-    from: `"${fromName}" <${from}>`,
+    from: safeName ? `"${safeName}" <${from}>` : from,
     to,
     subject,
     text,
@@ -15794,15 +15820,20 @@ app.post("/identity/connect/token", async (c) => {
       }));
       return c.json({ error: "invalid_grant", send_access_error_type: "unavailable" }, 400);
     }
-    if (sendHasPassword(send) && !(await verifySendPassword(c, store2, send, provided)).ok) {
-      console.warn("[send-access] password required/invalid");
-      return c.json(
-        {
-          error: "invalid_grant",
-          send_access_error_type: provided ? "password_hash_b64_invalid" : "password_hash_b64_required"
-        },
-        400
-      );
+    if (sendHasPassword(send)) {
+      const pw = await verifySendPassword(c, store2, send, provided);
+      if (!pw.ok) {
+        console.warn("[send-access] password required/invalid");
+        const hdr = pw.retryAfter ? { "retry-after": String(pw.retryAfter) } : {};
+        return c.json(
+          {
+            error: "invalid_grant",
+            send_access_error_type: provided ? "password_hash_b64_invalid" : "password_hash_b64_required"
+          },
+          pw.status ?? 400,
+          hdr
+        );
+      }
     }
     try {
       await mutate(
@@ -16591,16 +16622,10 @@ function attachmentToResponse(meta, base, env, sstamp = "-") {
 }
 var baseUrlOf = (c) => String(envGet(c, "BASE_URL", new URL(c.req.url).origin)).replace(/\/+$/, "");
 async function streamBinary(c, store, key, contentType = "application/octet-stream", extraHeaders = {}) {
-  let size = 0;
-  try {
-    size = (await store.head(key))?.size ?? 0;
-  } catch {
-  }
   try {
     const stream = await store.getStream(key);
     if (stream) {
       const headers = { ...extraHeaders, "content-type": contentType, "cache-control": "no-store" };
-      if (size) headers["content-length"] = String(size);
       return c.body(stream, 200, headers);
     }
   } catch (e) {
@@ -16824,7 +16849,7 @@ async function checkSendPassword(s, candidate) {
 var SEND_PW_MAX_FAILS_PER_MIN = 10;
 var SEND_PW_SUSPICIOUS_AFTER = 5;
 var SEND_PW_SOFT_CAP = 50;
-var SEND_PW_COOLDOWN_DELAY_MS = 600;
+var SEND_PW_COOLDOWN_SEC = 60;
 async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
   const ip = requestIp(c) ?? "no-ip";
@@ -16836,7 +16861,7 @@ async function verifySendPassword(c, store, send, candidate) {
   const cur = (await store.get(bucketKey))?.value;
   const sameWindow = cur && now - cur.start < windowMs;
   if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
-    return { ok: false, throttled: true, error: "Too many attempts. Try again later." };
+    return { ok: false, throttled: true, status: 429, retryAfter: SEND_PW_COOLDOWN_SEC, error: "Too many attempts. Try again later." };
   }
   if (await checkSendPassword(send, candidate)) {
     if (cur) await store.del(bucketKey).catch(() => {
@@ -16864,8 +16889,13 @@ async function verifySendPassword(c, store, send, candidate) {
   ).catch(() => {
   });
   if (fails >= SEND_PW_SOFT_CAP) {
-    await new Promise((r) => setTimeout(r, SEND_PW_COOLDOWN_DELAY_MS));
-    return { ok: false, coolingDown: true, error: "Too many failed attempts on this link" };
+    return {
+      ok: false,
+      coolingDown: true,
+      status: 429,
+      retryAfter: SEND_PW_COOLDOWN_SEC,
+      error: "Too many failed attempts on this link"
+    };
   }
   return {
     ok: false,
@@ -17081,7 +17111,10 @@ app.post("/api/sends/access/:accessId", async (c) => {
   const password = p.password ?? p.passwordHash ?? null;
   if (sendHasPassword(send)) {
     const pw = await verifySendPassword(c, store, send, password);
-    if (!pw.ok) return c.json({ error: pw.error }, 401);
+    if (!pw.ok) {
+      const hdr = pw.retryAfter ? { "retry-after": String(pw.retryAfter) } : {};
+      return c.json({ error: pw.error }, pw.status ?? 401, hdr);
+    }
   }
   try {
     await mutate(
@@ -17164,7 +17197,9 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
     const inline = p.password ?? p.passwordHash ?? null;
     const pw = await verifySendPassword(c, store, send, inline);
     if (!pw.ok) {
-      return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
+      const hdr = pw.retryAfter ? { "retry-after": String(pw.retryAfter) } : {};
+      const code = pw.status ?? 401;
+      return c.json({ error: pw.error, message: pw.error, statusCode: code }, code, hdr);
     }
   }
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
@@ -17400,7 +17435,10 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send)) {
     const pw = await verifySendPassword(c, store, send, p.password ?? null);
-    if (!pw.ok) return c.json({ error: pw.error }, 401);
+    if (!pw.ok) {
+      const hdr = pw.retryAfter ? { "retry-after": String(pw.retryAfter) } : {};
+      return c.json({ error: pw.error }, pw.status ?? 401, hdr);
+    }
   }
   try {
     await mutate(

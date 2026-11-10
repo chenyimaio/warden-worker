@@ -108,8 +108,10 @@ const ATT_TTL_SEC = 600;
 
 export function makeAttachmentToken(env, { uid, aid, sstamp = '-', ttl = ATT_TTL_SEC }) {
   const exp = Math.floor(Date.now() / 1000) + ttl;
-  // sstamp 绑进票据：改密/踢设备/轮换之后，已签发的附件链接也立刻失效
-  const payload = Buffer.from(`${uid}:${aid}:${exp}:${sstamp}`).toString('base64url');
+  // sstamp 绑进票据：改密/踢设备/轮换之后，已签发的附件链接也立刻失效。
+  // 用 JSON 而不是 `uid:aid:exp:sstamp` 拼接：字段里一旦出现分隔符解析就会错位。
+  // 当前字段都是 UUID 不会出事，但没必要留这个脆弱点。
+  const payload = Buffer.from(JSON.stringify({ u: uid, a: aid, e: exp, s: sstamp })).toString('base64url');
   const sig = createHmac('sha256', secret(env, 'JWT_SECRET')).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -124,6 +126,17 @@ export function verifyAttachmentToken(env, token) {
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
 
   const decoded = Buffer.from(payload, 'base64url').toString('utf8');
+  // 新格式是 JSON；旧格式（已签发、10 分钟内到期）继续按 `:` 解析，平滑过渡
+  if (decoded.startsWith('{')) {
+    try {
+      const o = JSON.parse(decoded);
+      if (!o?.u || !o?.a || o?.e == null) return null;
+      if (Number(o.e) < Math.floor(Date.now() / 1000)) return null;
+      return { uid: String(o.u), aid: String(o.a), sstamp: o.s == null ? '-' : String(o.s) };
+    } catch {
+      return null;
+    }
+  }
   const [uid, aid, expStr, sstamp] = decoded.split(':');
   if (!uid || !aid || !expStr) return null;
   if (Number(expStr) < Math.floor(Date.now() / 1000)) return null;
@@ -201,7 +214,8 @@ export function validateTotp(code, secretB32, lastUsed = 0, allowDrift = false) 
   for (let off = -drift; off <= drift; off++) {
     const step = currentStep + off;
     if (step <= lastUsed) continue;
-    if (totpAt(secretB32, step) === String(code)) return step;
+    // 6 位数字长度固定，但既然是凭据比较就统一走常量时间
+    if (safeEqual(totpAt(secretB32, step), String(code))) return step;
   }
   throw new Error('Invalid TOTP code');
 }
@@ -220,7 +234,15 @@ const SEAL_LABEL = 'warden/v1/field-encryption';
 const SEAL_PREFIX = 'enc:v1:';
 
 function sealKey(env) {
-  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  // 优先用独立的 SECRET_ENCRYPTION_KEY。没有时才退回 JWT_SECRET（保持既有部署可用）。
+  // 这一点很重要：JWT_SECRET 一换，所有用旧密钥封装的恢复码都会解不开，
+  // 而 2FA 还开着 —— 用户会被彻底锁在门外，且毫无提示。
+  // 单独设一个密钥后，轮换 JWT_SECRET 就不再影响已存的恢复码。
+  const base =
+    env?.SECRET_ENCRYPTION_KEY ??
+    process.env.SECRET_ENCRYPTION_KEY ??
+    env?.JWT_SECRET ??
+    process.env.JWT_SECRET;
   if (!base) throw new Error('missing secret: JWT_SECRET');
   return createHash('sha256').update(`${SEAL_LABEL}:${base}`).digest();
 }

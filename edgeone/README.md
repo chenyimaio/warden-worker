@@ -109,6 +109,7 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `JWT_REFRESH_SECRET` | 由 `JWT_SECRET` 派生 | 刷新令牌签名密钥。**留空即可**，服务端用 `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生出一个独立密钥；只有需要单独轮换它时才填 |
+| `SECRET_ENCRYPTION_KEY` | 由 `JWT_SECRET` 派生 | 恢复码 / TOTP 密钥的加密密钥（AES-256-GCM）。**建议显式配置**：留空时会跟着 `JWT_SECRET` 派生，一旦轮换 `JWT_SECRET`，所有已存的恢复码都会解不开，而 2FA 还开着 —— 用户会被锁在门外且毫无提示。设了独立值后轮换 `JWT_SECRET` 不再影响已存恢复码（≥32 字符） |
 | `PASSWORD_ITERATIONS` | `600000` | 服务端对客户端 `masterPasswordHash` 再套一层 PBKDF2 时的迭代次数。改大更慢更安全，**改小会让老账号登录失败** |
 | `ALLOW_TOTP_DRIFT` | `true` | TOTP 是否允许 ±1 个时间步的时钟漂移。`false` 更严格，但客户端时钟偏差会导致验证失败 |
 | `UPLOAD_MAX_BYTES` | `6291456`（6 MiB） | **所有上传/下载的硬上限**（文件 Send 与条目附件共用）。超过时创建阶段直接 413 |
@@ -151,7 +152,7 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 ### 4.7 配置须知
 
 1. **改完必须重新部署**：Makers 不会热加载环境变量。
-2. **密钥类建议用控制台的「加密变量」**：`JWT_SECRET`、`JWT_REFRESH_SECRET`、`SMTP_PASS`。
+2. **密钥类建议用控制台的「加密变量」**：`JWT_SECRET`、`JWT_REFRESH_SECRET`、`SECRET_ENCRYPTION_KEY`、`SMTP_PASS`。
 3. **邮件可以后加**：先不配也能正常注册、登录、同步，只是没有提示邮件。
 4. **`BASE_URL` 写错会导致文件 Send 下载失败**：下载链接是拼出来的绝对地址。
 
@@ -207,7 +208,7 @@ curl -s -X POST localhost:8787/api/accounts/password-hint \
 
 | 命令 | 用途 |
 |---|---|
-| `npm run smoke` | 196 项契约测试（memory 存储） |
+| `npm run smoke` | 202 项契约测试（memory 存储） |
 | `npm run parity` | 与上游 Rust 路由做集合比对 |
 | `npm run test:blob` | Blob 适配器测试 |
 | `node scripts/test-upload.mjs` | multipart 解析测试 |
