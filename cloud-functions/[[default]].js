@@ -15098,7 +15098,8 @@ var corsOptions = {
   maxAge: 600
 };
 var ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-var validId = (v) => v == null || v === "" || ID_RE.test(String(v));
+var validId = (v) => v != null && ID_RE.test(String(v));
+var optionalId = (v) => v == null || validId(v);
 var BODY_MAX_BYTES = 4 * 1024 * 1024;
 app.use("*", async (c, next) => {
   const rawPath = new URL(c.req.url).pathname.toLowerCase();
@@ -15793,7 +15794,7 @@ app.post("/identity/connect/token", async (c) => {
       }));
       return c.json({ error: "invalid_grant", send_access_error_type: "unavailable" }, 400);
     }
-    if (sendHasPassword(send) && !(await verifySendPassword(store2, send, provided)).ok) {
+    if (sendHasPassword(send) && !(await verifySendPassword(c, store2, send, provided)).ok) {
       console.warn("[send-access] password required/invalid");
       return c.json(
         {
@@ -16092,7 +16093,7 @@ async function createCipher(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const src = p.cipher ?? p;
-  if (!validId(src.id)) return c.json({ error: "invalid id" }, 400);
+  if (!optionalId(src.id)) return c.json({ error: "invalid id" }, 400);
   const store = getStore2(c.env);
   const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
   if (folder.error) return c.json({ error: folder.error }, 400);
@@ -16820,37 +16821,50 @@ async function checkSendPassword(s, candidate) {
   const b = Buffer.from(String(s.passwordHash));
   return a.length === b.length && timingSafeEqual3(a, b);
 }
-var SEND_PASSWORD_MAX_FAILS = 5;
-var SEND_PASSWORD_LOCK_MS = 15 * 60 * 1e3;
-async function verifySendPassword(store, send, candidate) {
+var SEND_PW_MAX_FAILS_PER_MIN = 10;
+var SEND_PW_SUSPICIOUS_AFTER = 5;
+async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
+  const ip = requestIp(c) ?? "no-ip";
+  const bucketKey = keys.rate(
+    `send-pw/${createHash2("sha256").update(`${ip}:${send.id}`).digest("hex").slice(0, 32)}`
+  );
   const now = Date.now();
-  if (Number(send.lockedUntil ?? 0) > now) {
-    return { ok: false, locked: true, error: "Too many failed attempts. Try again later." };
+  const windowMs = 60 * 1e3;
+  const cur = (await store.get(bucketKey))?.value;
+  const sameWindow = cur && now - cur.start < windowMs;
+  if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
+    return { ok: false, throttled: true, error: "Too many attempts. Try again later." };
   }
   if (await checkSendPassword(send, candidate)) {
+    if (cur) await store.del(bucketKey).catch(() => {
+    });
     if (Number(send.failedAttempts ?? 0) > 0) {
       await mutate(
         store,
         keys.send(send.userId, send.id),
-        (cur) => cur ? { ...cur, failedAttempts: 0, lockedUntil: null } : void 0
+        (x) => x ? { ...x, failedAttempts: 0, updatedAt: nowIso() } : void 0
       ).catch(() => {
       });
     }
     return { ok: true };
   }
+  const start = sameWindow ? cur.start : now;
+  await store.put(bucketKey, { start, count: (sameWindow ? Number(cur.count ?? 0) : 0) + 1, exp: start + windowMs }).catch(
+    () => {
+    }
+  );
   const fails = Number(send.failedAttempts ?? 0) + 1;
-  const lockedUntil = fails >= SEND_PASSWORD_MAX_FAILS ? now + SEND_PASSWORD_LOCK_MS : null;
   await mutate(
     store,
     keys.send(send.userId, send.id),
-    (cur) => cur ? { ...cur, failedAttempts: fails, lockedUntil, updatedAt: nowIso() } : void 0
+    (x) => x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : void 0
   ).catch(() => {
   });
   return {
     ok: false,
-    locked: Boolean(lockedUntil),
-    error: lockedUntil ? "Too many failed attempts. Try again later." : "Invalid password"
+    suspicious: fails >= SEND_PW_SUSPICIOUS_AFTER,
+    error: "Invalid password"
   };
 }
 function validateSendAccess(s, nowIsoStr = nowIso()) {
@@ -16885,6 +16899,10 @@ function sendToJson(s) {
     // 不回传口令哈希：规格里这个字段恒为 null，客户端靠 authType 判断是否带口令
     password: null,
     authType: sendHasPassword(s) ? 1 : 0,
+    // 给属主看的健康状态：这条链接最近被失败尝试了多少次。
+    // 客户端不认这个字段，纯属诊断用 —— 否则链接"打不开"时属主完全无从判断。
+    failedAttempts: Number(s.failedAttempts ?? 0),
+    suspicious: Number(s.failedAttempts ?? 0) >= SEND_PW_SUSPICIOUS_AFTER,
     object: "send"
   };
 }
@@ -16949,7 +16967,7 @@ async function createTextSend(c) {
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
   const now = nowIso();
-  if (!validId(p.id)) return c.json({ error: "invalid id" }, 400);
+  if (!optionalId(p.id)) return c.json({ error: "invalid id" }, 400);
   const id = String(p.id ?? newId());
   const send = {
     id,
@@ -17056,7 +17074,7 @@ app.post("/api/sends/access/:accessId", async (c) => {
   const p = await body(c);
   const password = p.password ?? p.passwordHash ?? null;
   if (sendHasPassword(send)) {
-    const pw = await verifySendPassword(store, send, password);
+    const pw = await verifySendPassword(c, store, send, password);
     if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
   try {
@@ -17138,7 +17156,7 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send) && !tokenBound) {
     const inline = p.password ?? p.passwordHash ?? null;
-    const pw = await verifySendPassword(store, send, inline);
+    const pw = await verifySendPassword(c, store, send, inline);
     if (!pw.ok) {
       return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
     }
@@ -17204,7 +17222,7 @@ app.post("/api/sends/file/v2", async (c) => {
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
   const now = nowIso();
-  if (!validId(p.id)) return c.json({ error: "invalid id" }, 400);
+  if (!optionalId(p.id)) return c.json({ error: "invalid id" }, 400);
   const id = String(p.id ?? newId());
   const fileName = String(p.file?.fileName ?? p.fileName ?? "file");
   const size = Number(p.fileLength ?? p.file?.size ?? 0) || 0;
@@ -17375,7 +17393,7 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send)) {
-    const pw = await verifySendPassword(store, send, p.password ?? null);
+    const pw = await verifySendPassword(c, store, send, p.password ?? null);
     if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
   try {
@@ -17445,14 +17463,21 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
     );
   }
   for (const rc of reqCiphers) {
+    if (!validId(rc?.id)) continue;
     const data = cipherDataFrom(rc);
+    let rotFolderId;
+    if (rc.folderId !== void 0) {
+      const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
+      if (folder.error) continue;
+      rotFolderId = folder.folderId;
+    }
     await mutate(
       store,
       keys.cipher(a.claims.sub, String(rc.id)),
       (cur) => cur ? {
         ...cur,
         data: { ...cur.data, ...data },
-        folderId: rc.folderId ?? null,
+        folderId: rotFolderId !== void 0 ? rotFolderId : cur.folderId,
         favorite: rc.favorite !== void 0 ? Boolean(rc.favorite) : cur.favorite,
         updatedAt: nowIso()
       } : void 0
@@ -17466,7 +17491,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
     }
   }
   for (const rs of Array.isArray(p.accountData?.sends) ? p.accountData.sends : []) {
-    if (!rs?.id) continue;
+    if (!validId(rs?.id)) continue;
     await mutate(
       store,
       keys.send(a.claims.sub, String(rs.id)),

@@ -1111,27 +1111,40 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   r = await call('POST', '/api/ciphers', { token: ua, body: { type: 1, name: 'z', login: {}, folderId: ownFolder } });
   check('create 用自己的 folderId -> 200', r.status === 200, r);
 
-  // 每 Send 口令失败计数：换 IP 也挡得住
+  // 每 Send 的口令尝试：按 (IP, Send) 限速，且正确口令永远放行
   const delDate = new Date(Date.now() + 86400e3).toISOString();
   r = await call('POST', '/api/sends', {
     token: ua,
     body: { type: 0, key: 'k', name: 'pw-send', text: { text: 'x' }, deletionDate: delDate, password: 'letmein' },
   });
   const pwAccess = r.data?.accessId;
-  const seen = [];
-  for (let i = 0; i < 6; i++) {
+
+  // 第三方用一个 IP 连打错口令，把自己这个 (IP, Send) 桶打满
+  const attacker = [];
+  for (let i = 0; i < 12; i++) {
     const x = await call('POST', `/api/sends/access/${pwAccess}`, {
       body: { password: `wrong${i}` },
-      headers: { 'eo-connecting-ip': `10.9.9.${i}` },
+      headers: { 'eo-connecting-ip': '10.9.9.9' },
     });
-    seen.push(x.status);
+    attacker.push(x.status);
   }
-  check('Send 口令连错 6 次（每次换 IP）仍然被锁定', seen.slice(-1)[0] === 401, seen);
+  check('第三方同 IP 连打 12 次错口令 -> 后段被限速', attacker.slice(-1)[0] === 401 && attacker.includes(401), attacker);
+
+  // 关键：另一个 IP 用正确口令必须仍然放行（不能被第三方锁死）
   r = await call('POST', `/api/sends/access/${pwAccess}`, {
     body: { password: 'letmein' },
-    headers: { 'eo-connecting-ip': '10.9.9.99' },
+    headers: { 'eo-connecting-ip': '10.7.7.7' },
   });
-  check('锁定期内即使口令正确也被拒', r.status === 401, r);
+  check('他人打满后，另一个 IP 用正确口令仍可访问', r.status === 200 && !!r.data?.token, r);
+
+  // 打满的那个 IP 在窗口内被拒——这是有意的：
+  // 限流必须发生在校验之前，否则攻击者仍能无限跑 PBKDF2 试口令。
+  // 影响范围只有「这个 IP + 这条 Send」，1 分钟后自动恢复，不波及他人。
+  r = await call('POST', `/api/sends/access/${pwAccess}`, {
+    body: { password: 'letmein' },
+    headers: { 'eo-connecting-ip': '10.9.9.9' },
+  });
+  check('打满的 IP 在窗口内被限速（范围仅限该 IP + 该 Send）', r.status === 401 && /Too many/i.test(String(r.data?.error ?? '')), r);
 }
 
 const failed = results.filter((x) => !x.ok);

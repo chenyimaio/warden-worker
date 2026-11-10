@@ -58,7 +58,11 @@ const corsOptions = {
 // 客户端传进来的 id 会直接拼进存储键（u/{uid}/ciphers/{id}.json）。对象键是字面量、
 // 不会真的路径穿越，但 %2F、反斜杠、.. 能让键落到意想之外的位置，一律在入口拒绝。
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const validId = (v) => v == null || v === '' || ID_RE.test(String(v));
+// 注意：空串不放行。'' 拼进存储键会得到 u/{uid}/ciphers/.json 这种"目录本身"的键，
+// 语义混乱；调用方确实允许缺省时应该自己判断 v == null，而不是依赖这里放行 ''。
+const validId = (v) => v != null && ID_RE.test(String(v));
+// 可选 id：客户端可以不传（服务端生成），一旦传了就必须合法
+const optionalId = (v) => v == null || validId(v);
 
 // 单个 JSON 请求体上限：平台给到 ~6 MB，但业务 JSON 没理由这么大，
 // 留 4 MiB 既够导入，又能挡住"一个字段 4 MB"的滥用。
@@ -895,7 +899,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
       }));
       return c.json({ error: 'invalid_grant', send_access_error_type: 'unavailable' }, 400);
     }
-    if (sendHasPassword(send) && !(await verifySendPassword(store, send, provided)).ok) {
+    if (sendHasPassword(send) && !(await verifySendPassword(c, store, send, provided)).ok) {
       console.warn('[send-access] password required/invalid');
       return c.json(
         {
@@ -1237,7 +1241,7 @@ async function createCipher(c) {
   const p = await body(c);
   const src = p.cipher ?? p;
   // id 会直接拼进存储键（u/{uid}/ciphers/{id}.json），客户端自报的 id 必须是安全字符
-  if (!validId(src.id)) return c.json({ error: 'invalid id' }, 400);
+  if (!optionalId(src.id)) return c.json({ error: 'invalid id' }, 400);
   const store = getStore(c.env);
   const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
   if (folder.error) return c.json({ error: folder.error }, 400);
@@ -2122,34 +2126,59 @@ async function checkSendPassword(s, candidate) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-// 每条 Send 的口令失败计数：外层 IP 限流换 IP 就绕过，
-// 只有把失败记在 Send 自己身上才能真正挡住针对单条链接的爆破。
-const SEND_PASSWORD_MAX_FAILS = 5;
-const SEND_PASSWORD_LOCK_MS = 15 * 60 * 1000;
+// Send 口令尝试限速。
+//
+// 上一版按「每条 Send 累计失败 5 次就锁 15 分钟」，结果是任何拿到链接的人
+// 都能用 5 个错口令把别人的分享链接锁死 —— 一个可用性 DoS。
+//
+// 现在改成两条独立的线：
+//   · 限速按 (客户端 IP, Send) 二元组，单 IP 对单 Send 每分钟最多 10 次失败；
+//     不同 IP 互不影响，所以第三方无法用自己制造的失败拖住合法接收方。
+//   · **正确口令永远放行**，并顺手清零两处计数；锁定状态只作为提示，
+//     不用来拒绝正确口令。
+// send.failedAttempts 仍然记录，供属主判断"这条链接正在被爆破"。
+const SEND_PW_MAX_FAILS_PER_MIN = 10;
+const SEND_PW_SUSPICIOUS_AFTER = 5;
 
-async function verifySendPassword(store, send, candidate) {
+async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
+
+  const ip = requestIp(c) ?? 'no-ip';
+  const bucketKey = keys.rate(
+    `send-pw/${createHash('sha256').update(`${ip}:${send.id}`).digest('hex').slice(0, 32)}`,
+  );
   const now = Date.now();
-  if (Number(send.lockedUntil ?? 0) > now) {
-    return { ok: false, locked: true, error: 'Too many failed attempts. Try again later.' };
+  const windowMs = 60 * 1000;
+
+  const cur = (await store.get(bucketKey))?.value;
+  const sameWindow = cur && now - cur.start < windowMs;
+  if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
+    return { ok: false, throttled: true, error: 'Too many attempts. Try again later.' };
   }
+
   if (await checkSendPassword(send, candidate)) {
+    // 正确口令：清掉这个 IP 的失败计数和 Send 上的累计
+    if (cur) await store.del(bucketKey).catch(() => {});
     if (Number(send.failedAttempts ?? 0) > 0) {
-      await mutate(store, keys.send(send.userId, send.id), (cur) =>
-        cur ? { ...cur, failedAttempts: 0, lockedUntil: null } : undefined,
+      await mutate(store, keys.send(send.userId, send.id), (x) =>
+        x ? { ...x, failedAttempts: 0, updatedAt: nowIso() } : undefined,
       ).catch(() => {});
     }
     return { ok: true };
   }
+
+  const start = sameWindow ? cur.start : now;
+  await store.put(bucketKey, { start, count: (sameWindow ? Number(cur.count ?? 0) : 0) + 1, exp: start + windowMs }).catch(
+    () => {},
+  );
   const fails = Number(send.failedAttempts ?? 0) + 1;
-  const lockedUntil = fails >= SEND_PASSWORD_MAX_FAILS ? now + SEND_PASSWORD_LOCK_MS : null;
-  await mutate(store, keys.send(send.userId, send.id), (cur) =>
-    cur ? { ...cur, failedAttempts: fails, lockedUntil, updatedAt: nowIso() } : undefined,
+  await mutate(store, keys.send(send.userId, send.id), (x) =>
+    x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : undefined,
   ).catch(() => {});
   return {
     ok: false,
-    locked: Boolean(lockedUntil),
-    error: lockedUntil ? 'Too many failed attempts. Try again later.' : 'Invalid password',
+    suspicious: fails >= SEND_PW_SUSPICIOUS_AFTER,
+    error: 'Invalid password',
   };
 }
 
@@ -2187,6 +2216,10 @@ function sendToJson(s) {
     // 不回传口令哈希：规格里这个字段恒为 null，客户端靠 authType 判断是否带口令
     password: null,
     authType: sendHasPassword(s) ? 1 : 0,
+    // 给属主看的健康状态：这条链接最近被失败尝试了多少次。
+    // 客户端不认这个字段，纯属诊断用 —— 否则链接"打不开"时属主完全无从判断。
+    failedAttempts: Number(s.failedAttempts ?? 0),
+    suspicious: Number(s.failedAttempts ?? 0) >= SEND_PW_SUSPICIOUS_AFTER,
     object: 'send',
   };
 }
@@ -2262,7 +2295,7 @@ async function createTextSend(c) {
 
   const now = nowIso();
   // id 会进存储键，客户端自报的 id 必须是安全字符
-  if (!validId(p.id)) return c.json({ error: 'invalid id' }, 400);
+  if (!optionalId(p.id)) return c.json({ error: 'invalid id' }, 400);
   const id = String(p.id ?? newId());
   const send = {
     id,
@@ -2382,7 +2415,7 @@ app.post('/api/sends/access/:accessId', async (c) => {
   const p = await body(c);
   const password = p.password ?? p.passwordHash ?? null;
   if (sendHasPassword(send)) {
-    const pw = await verifySendPassword(store, send, password);
+    const pw = await verifySendPassword(c, store, send, password);
     if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
 
@@ -2480,7 +2513,7 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   // 兼容：客户端把密码直接内联在这个请求里也认（网页版个别路径会这么发）。
   if (sendHasPassword(send) && !tokenBound) {
     const inline = p.password ?? p.passwordHash ?? null;
-    const pw = await verifySendPassword(store, send, inline);
+    const pw = await verifySendPassword(c, store, send, inline);
     if (!pw.ok) {
       return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
     }
@@ -2567,7 +2600,7 @@ app.post('/api/sends/file/v2', async (c) => {
 
   const now = nowIso();
   // id 会进存储键，客户端自报的 id 必须是安全字符
-  if (!validId(p.id)) return c.json({ error: 'invalid id' }, 400);
+  if (!optionalId(p.id)) return c.json({ error: 'invalid id' }, 400);
   const id = String(p.id ?? newId());
   const fileName = String(p.file?.fileName ?? p.fileName ?? 'file');
   const size = Number(p.fileLength ?? p.file?.size ?? 0) || 0;
@@ -2783,7 +2816,7 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send)) {
-    const pw = await verifySendPassword(store, send, p.password ?? null);
+    const pw = await verifySendPassword(c, store, send, p.password ?? null);
     if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
 
@@ -2871,13 +2904,21 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
     );
   }
   for (const rc of reqCiphers) {
+    if (!validId(rc?.id)) continue;
     const data = cipherDataFrom(rc);
+    // folderId 归属校验：轮换请求是客户端发来的，不能直接采信
+    let rotFolderId;
+    if (rc.folderId !== undefined) {
+      const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
+      if (folder.error) continue;
+      rotFolderId = folder.folderId;
+    }
     await mutate(store, keys.cipher(a.claims.sub, String(rc.id)), (cur) =>
       cur
         ? {
             ...cur,
             data: { ...cur.data, ...data },
-            folderId: rc.folderId ?? null,
+            folderId: rotFolderId !== undefined ? rotFolderId : cur.folderId,
             favorite: rc.favorite !== undefined ? Boolean(rc.favorite) : cur.favorite,
             updatedAt: nowIso(),
           }
@@ -2890,7 +2931,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
     }
   }
   for (const rs of Array.isArray(p.accountData?.sends) ? p.accountData.sends : []) {
-    if (!rs?.id) continue;
+    if (!validId(rs?.id)) continue;
     await mutate(store, keys.send(a.claims.sub, String(rs.id)), (cur) =>
       cur
         ? {
