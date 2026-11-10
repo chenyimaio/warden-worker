@@ -117,13 +117,24 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 > 两种令牌不能互相冒用。只有需要单独轮换刷新令牌密钥时才显式配置它。
 
-### 4.4 网页版（构建期生效）
+### 4.4 网页版（已入库，无需配置）
+
+网页版产物已经提交在 `edgeone/public/`（267 个文件，约 80 MB），部署构建**不再下载**，
+所以这里没有任何开关要配。直接访问 `/` 就是网页版登录页。
+
+升级网页版时（手动操作，构建期不会自动跑）：
+
+```bash
+cd edgeone
+WEB_VAULT_TARBALL=/path/bw_web_v2026.10.1.tar.gz npm run webvault
+git add public && git commit -m "chore(web-vault): bump to vX"
+```
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WEB_VAULT_ENABLED` | `true` | `false` 则构建时跳过下载，产物体积从 ~80 MB 降到接近 0 为false时send等需要webui的功能不可使用 |
-| `WEB_VAULT_VERSION` | `v2026.10.1` | 固定的 Web Vault 版本 |
-| `WEB_VAULT_BASE_URL` | GitHub Releases | 换镜像源用（国内构建机拉不动 GitHub 时） |
+| `WEB_VAULT_VERSION` | `v2026.10.1` | 仅刷新脚本用，决定拉哪个版本 |
+| `WEB_VAULT_BASE_URL` | GitHub Releases | 仅刷新脚本用，换镜像源（国内拉不动 GitHub 时） |
+| `WEB_VAULT_TARBALL` | 无 | 仅刷新脚本用，指向本地 tar 包，跳过下载 |
 
 ### 4.5 邮件（全部可选）
 

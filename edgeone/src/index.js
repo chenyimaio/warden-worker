@@ -570,13 +570,9 @@ app.get('/api/config', (c) => {
   });
 });
 
-// 网页版开关：供前端落地页决定是否跳到 /vault/
-app.get('/api/web-status', (c) =>
-  c.json({
-    enabled: String(envGet(c, 'WEB_VAULT_ENABLED', 'true')).toLowerCase() !== 'false',
-    object: 'web-status',
-  }),
-);
+// 网页版现在是仓库里的静态产物（public/），直接由静态层提供，函数不需要做任何判断。
+// 曾经有个 /api/web-status 供"落地页决定要不要跳到 /vault/"，落地页删掉后它就没有调用方了，
+// 一并移除 —— 留着只会让人以为还有个开关要配。
 
 // ---------------------------------------------------------------- accounts
 const prelogin = async (c) => {
@@ -3596,8 +3592,7 @@ app.all('*', (c) => {
 const exported = new Hono();
 exported.use('*', cors(corsOptions));
 // 网页版直接构建在站点根（public/index.html）。这里不再给 / 和 /index.html 注册
-// 任何特殊处理：构建成功时静态层会先命中，构建失败（或 WEB_VAULT_ENABLED=false）
-// 就让请求落到下面的兜底 404，交给 CDN/平台自己的处理，函数不插手。
+// 任何特殊处理：静态层会先命中，命中不了就落到下面的兜底 404，函数不插手。
 // 旧书签兼容：/vault 与 /vault/index.html 指回根路径（浏览器会保留 #hash）
 exported.get('/vault', (c) => c.redirect('/', 302));
 // 网页版会为每个登录项请求 /icons/{域名}/icon.png 拿网站图标。我们没有这个服务，

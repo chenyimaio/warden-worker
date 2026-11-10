@@ -15601,13 +15601,6 @@ app.get("/api/config", (c) => {
     object: "config"
   });
 });
-app.get(
-  "/api/web-status",
-  (c) => c.json({
-    enabled: String(envGet(c, "WEB_VAULT_ENABLED", "true")).toLowerCase() !== "false",
-    object: "web-status"
-  })
-);
 var prelogin = async (c) => {
   const rl = await limit(c, "prelogin", requestIp(c), 30, 60);
   if (rl) return rl;

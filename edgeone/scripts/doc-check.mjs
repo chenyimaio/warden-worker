@@ -43,7 +43,7 @@ if (existsSync(examplePath)) {
 const diff = (a, b) => [...a].filter((x) => !b.has(x)).sort();
 
 // 只在构建期脚本（fetch-web-vault / build-makes）里用，不进 src，不算文档漂移
-const BUILD_TIME_ONLY = new Set(['WEB_VAULT_VERSION', 'WEB_VAULT_BASE_URL', 'OUT_DIR', 'VAULT_MAX_FILE_MB', 'OUT']);
+const BUILD_TIME_ONLY = new Set(['WEB_VAULT_VERSION', 'WEB_VAULT_BASE_URL', 'WEB_VAULT_TARBALL', 'OUT_DIR', 'VAULT_MAX_FILE_MB', 'OUT']);
 for (const v of BUILD_TIME_ONLY) { used.delete(v); documented.delete(v); }
 
 const undocumented = diff(used, documented);
