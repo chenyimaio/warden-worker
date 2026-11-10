@@ -17,12 +17,12 @@
 | C-1 | 🔴 严重 | 带密码的**文件 Send 可以完全绕过密码**下载 | ✅ 已修复 + 回归用例 |
 | C-2 | 🔴 严重 | 只凭 access token 就能**改掉主密码**，不需要当前密码 | ✅ 已修复 + 回归用例 |
 | H-1 | 🟠 高 | `requestIp()` 信任客户端可伪造的头，**IP 限流可绕过** | ✅ 已修复 |
-| H-2 | 🟠 高 | 下载/上传令牌放在 URL query 里，会进日志、历史、Referer | 🟡 部分修复（有效期 1h → 10min） |
+| H-2 | 🟠 高 | 下载/上传令牌放在 URL query 里，会进日志、历史、Referer | ✅ 已修复（限次 + 支持 header + no-referrer） |
 | M-1 | 🟡 中 | CORS 全开放 `Access-Control-Allow-Origin: *` | ✅ 已修复 |
 | M-2 | 🟡 中 | `/api/accounts/verify-password` 无限流，可当密码校验 oracle | ✅ 已修复 |
 | M-3 | 🟡 中 | 签名密钥没有最小长度校验，弱密钥可部署上线 | ✅ 已修复 |
 | M-4 | 🟡 中 | 文件 Send 的 `maxAccessCount` / 访问计数实际不生效 | ✅ 已修复 |
-| L-1…L-9 | 🔵 低 | 见第四节 | 见第七节 |
+| L-1…L-9 | 🔵 低 | 见第四节 | ✅ 除 L-5 外全部处理（见下） |
 
 ### 修复记录（本次提交）
 
@@ -39,6 +39,20 @@
 | L-2 | `jwtVerify` 全部固定 `algorithms: ['HS256']` |
 | L-4 | `bulkMutate` / `importCiphers` 加条目上限（2000 / 5000） |
 | L-6 | `PASSWORD_ITERATIONS` 统一走 `pbkdf2Iterations()`，下限 60000 |
+
+### 第二轮修复（低危 + 残留项）
+
+| 项 | 改动 |
+|---|---|
+| H-2 | 下载路由支持 `Authorization` 头（优先）；票据改为**限次使用**（5 次，覆盖客户端重试），第 6 次 401，即使 URL 进日志也无法反复重放；全局加 `Referrer-Policy: no-referrer` 与 `X-Content-Type-Options: nosniff` |
+| L-1 | 注册接口按**邮箱**再加 5/min 限流（IP 已限 10/min），把枚举成本抬起来（保留"邮箱已存在"提示，否则破坏客户端 UX） |
+| L-3 | 新增 `safeEqual()`，`securityStamp`、`accessCode`、refresh 的 `refreshId` 比较全部改为常量时间 |
+| L-7 | TOTP 恢复码落盘改为 **AES-256-GCM**（密钥由 `JWT_SECRET` 派生，`enc:v1:` 前缀）；读取兼容历史明文；`get-recover` 返回解密后的值 |
+| L-8 | 邮件日志的收件人改为 `e***@domain` 形式 |
+| L-9 | 构建期改用**仓库内钉住的 sha256**（`PINNED_SHA256`），不再只依赖同源的 `sha256sums.txt`；版本未钉住时校验失败即中止，并在报错里给出计算值 |
+| L-5 | **接受**：Blob 没有条件写，改成 `mutate()` 会给每个请求多两趟往返；限流本身是"尽力而为"的防护，按现状记录 |
+
+新增回归：`get-recover` 的值在存储里必须是 `enc:v1:` 密文、且不含明文恢复码；同一票据第 5 次可用、第 6 次被拒。
 
 回归用例已加入 `scripts/smoke.mjs`（第 27、28 节）：带密码文件 Send 的匿名/错误密码/带票据三条路径，以及"只凭 token 改密被拒""网页版结构改密成功且新密码可登录"。
 

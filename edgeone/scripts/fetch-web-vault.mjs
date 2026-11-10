@@ -101,20 +101,30 @@ async function main() {
   log(`下载 ${VERSION} ...`);
   await download(`${base}/${tarball}`, tgz);
 
-  // 校验 sha256
-  try {
-    const sums = await (await fetch(`${base}/sha256sums.txt`)).text();
-    const line = sums.split('\n').find((l) => l.includes(tarball));
-    if (line) {
+  // 校验 sha256：优先用仓库里钉死的哈希，其次用同源的 sha256sums.txt。
+  // 只用同源校验和只能防传输损坏 —— 源被篡改时可以同时改包和校验和。
+  const PINNED_SHA256 = {
+    'v2026.10.1': '354de9056c871e48db84975985e7d57c111ac6537bd4e4720488019e8638060f',
+  };
+  const gotHash = createHash('sha256').update(readFileSync(tgz)).digest('hex');
+  const pinned = PINNED_SHA256[VERSION];
+  if (pinned) {
+    if (pinned !== gotHash) throw new Error(`sha256 与仓库钉住的值不一致（期望 ${pinned}，实际 ${gotHash}）`);
+    log('sha256 校验通过（仓库钉住的哈希）');
+  } else {
+    try {
+      const sums = await (await fetch(`${base}/sha256sums.txt`)).text();
+      const line = sums.split('\n').find((l) => l.includes(tarball));
+      if (!line) throw new Error(`sha256sums.txt 里没有 ${tarball}`);
       const want = line.trim().split(/\s+/)[0];
-      const got = createHash('sha256').update(readFileSync(tgz)).digest('hex');
-      if (want !== got) throw new Error(`sha256 不匹配（期望 ${want}，实际 ${got}）`);
-      log('sha256 校验通过');
-    } else {
-      log('警告：sha256sums.txt 里没有该文件，跳过校验');
+      if (want !== gotHash) throw new Error(`sha256 不匹配（期望 ${want}，实际 ${gotHash}）`);
+      log('sha256 校验通过（同源 sha256sums.txt；该版本未被仓库钉住，建议补进 PINNED_SHA256）');
+    } catch (e) {
+      throw new Error(
+        `无法校验 ${tarball} 的完整性：${e.message}。` +
+          `如果要继续使用这个版本，请把 sha256 ${gotHash} 加进 scripts/fetch-web-vault.mjs 的 PINNED_SHA256。`,
+      );
     }
-  } catch (e) {
-    log('警告：校验步骤失败（继续）:', e.message);
   }
 
   log('解压 ...');

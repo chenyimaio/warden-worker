@@ -306,6 +306,16 @@ r = await call('POST', '/api/two-factor/get-recover', { token: access, body: { m
 const recoverCode = r.data?.code;
 check('get-recover 返回恢复码', r.status === 200 && typeof recoverCode === 'string' && recoverCode.length > 0, r);
 
+// 恢复码等价于凭据，落盘必须是密文（enc:v1: 前缀），不能是明文
+{
+  const { getStore, keys } = await import('../src/store.js');
+  const st = getStore(env);
+  const rows = await st.list('u/');
+  const profKey = rows.map((x) => x.key).find((k) => k.endsWith('/profile.json'));
+  const stored = profKey ? (await st.get(profKey))?.value?.totpRecover : null;
+  check('恢复码在存储里是密文', typeof stored === 'string' && stored.startsWith('enc:v1:') && !stored.includes(recoverCode), stored);
+}
+
 r = await login({ twoFactorProvider: '8', twoFactorToken: recoverCode });
 check('恢复码登录成功', r.status === 200 && !!r.data?.access_token, r);
 r = await call('GET', '/api/two-factor', { token: access });
@@ -780,6 +790,13 @@ if (r.data?.url) {
   const u = new URL(r.data.url, 'http://localhost');
   const bytes = await call('GET', u.pathname + u.search);
   check('带票据可以下载到明文', bytes.rawText === 'hidden', bytes);
+
+  // 票据限次（maxUses=5，第 1 次已在上面用掉）：再 4 次可用，第 6 次被拒
+  let lastStatus = 0;
+  for (let i = 0; i < 4; i++) lastStatus = (await call('GET', u.pathname + u.search)).status;
+  check('同一票据累计第 5 次仍可用', lastStatus === 200, lastStatus);
+  const over = await call('GET', u.pathname + u.search);
+  check('同一票据超过上限后被拒', over.status === 401, over);
 }
 
 // 28. 安全回归：改主密码必须证明当前密码

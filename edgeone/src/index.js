@@ -24,6 +24,9 @@ import {
   generateRecoveryCode,
   makeAttachmentToken,
   verifyAttachmentToken,
+  safeEqual,
+  sealSecret,
+  openSecret,
 } from './crypto.js';
 import { getStore, keys, mutate } from './store.js';
 import { sendPasswordHint, mailConfigured } from './mail.js';
@@ -49,11 +52,46 @@ const corsOptions = {
   maxAge: 600,
 };
 
+// 安全响应头：下载 URL 里带票据，Referer 一律不带出去；同时禁止 MIME 嗅探
+app.use('*', async (c, next) => {
+  await next();
+  c.header('referrer-policy', 'no-referrer');
+  c.header('x-content-type-options', 'nosniff');
+});
+
 app.use('*', cors(corsOptions));
 
 // 批量接口的条目上限：防止一个请求塞几万条 id，把函数拖到超时、产生大量存储写入
 const BULK_MAX_IDS = 2000;
 const IMPORT_MAX_ITEMS = 5000;
+
+// 一次性/限次令牌：URL 里的票据会进访问日志、浏览器历史、Referer，泄露后能被重放。
+// 这里记录用量（默认最多 3 次，够客户端重试），并低频清理过期标记。
+async function consumeToken(store, token, { maxUses = 5, ttlSec = 900 } = {}) {
+  const id = createHash('sha256').update(String(token)).digest('hex').slice(0, 32);
+  const key = `tok/${id}.json`;
+  const now = Math.floor(Date.now() / 1000);
+  const cur = (await store.get(key))?.value;
+  if (cur && Number(cur.exp) >= now && Number(cur.uses ?? 0) >= maxUses) return false;
+  const uses = cur && Number(cur.exp) >= now ? Number(cur.uses ?? 0) + 1 : 1;
+  await store.put(key, { exp: now + ttlSec, uses });
+
+  if (Math.random() < 0.02) {
+    try {
+      const rows = await store.list('tok/');
+      const stale = [];
+      for (const it of rows) {
+        const v = (await store.get(it.key))?.value;
+        if (!v || Number(v.exp) < now) stale.push(it.key);
+        if (stale.length >= 50) break;
+      }
+      await Promise.all(stale.map((k) => store.del(k).catch(() => {})));
+    } catch {
+      /* 清理失败不影响主流程 */
+    }
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------- helpers
 async function body(c) {
@@ -192,7 +230,7 @@ async function requireAuth(c) {
     const claims = await verifyAccess(c.env, m[1]);
     //  /  / security-stamp  access token 
     const prof = await getStore(c.env).get(keys.profile(claims.sub));
-    if (!prof || prof.value.securityStamp !== claims.sstamp) {
+    if (!prof || !safeEqual(prof.value.securityStamp, claims.sstamp)) {
       console.warn('[auth] stamp mismatch', c.req.method, c.req.path, 'sub=' + claims.sub, 'profile=' + Boolean(prof));
       return { error: c.json({ error: 'unauthorized', reason: 'stamp_mismatch' }, 401) };
     }
@@ -413,6 +451,9 @@ async function register(c) {
   const rl = await limit(c, 'register', requestIp(c), 10, 60);
   if (rl) return rl;
   if (!email) return c.json({ error: 'invalid email' }, 400);
+  // 按邮箱再限一层：注册接口会回答"邮箱是否已存在"，限流把枚举成本抬起来
+  const rlEmail = await limit(c, 'register-email', email, 5, 60);
+  if (rlEmail) return rlEmail;
   if (!allowedEmail(c, email)) return c.json({ error: 'Not allowed to signup' }, 401);
 
   const store = getStore(c.env);
@@ -540,7 +581,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
         ar.requestIp !== requestIp(c) ||
         Number(ar.deviceType) !== devType ||
         ar.requestDeviceIdentifier !== devId ||
-        String(ar.accessCode) !== mph
+        !safeEqual(ar.accessCode, mph)
       ) {
         return c.json({ error: 'invalid_grant', error_description: 'Username or access code is incorrect. Try again.', message: 'Username or access code is incorrect. Try again.', Message: 'Username or access code is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or access code is incorrect. Try again.'] } }, 400);
       }
@@ -584,7 +625,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
           const dev = await store.get(keys.device(user.id, deviceId));
           if (!dev || dev.value.twofactorRemember !== code) throw new Error('remember mismatch');
         } else if (provider === TFA_RECOVERY) {
-          const stored = String(user.totpRecover ?? '');
+          const stored = String(openSecret(c.env, user.totpRecover) ?? '');
           if (!stored || stored.toUpperCase() !== code.trim().toUpperCase()) {
             return c.json({ error: 'Recovery code is incorrect' }, 400);
           }
@@ -649,7 +690,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     if (!device) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     if (!prof) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     const user = prof.value;
-    if (payload.refreshId !== device.value.refreshId || payload.sstamp !== user.securityStamp) {
+    if (!safeEqual(payload.refreshId, device.value.refreshId) || !safeEqual(payload.sstamp, user.securityStamp)) {
       return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
     const accessToken = await signAccess(c.env, {
@@ -1268,7 +1309,7 @@ async function activateAuthenticator(c) {
 if (!a.user.totpRecover) {
     const code = generateRecoveryCode();
     await mutate(store, keys.profile(a.claims.sub), (cur) =>
-      cur ? { ...cur, totpRecover: code, updatedAt: nowIso() } : undefined,
+      cur ? { ...cur, totpRecover: sealSecret(c.env, code), updatedAt: nowIso() } : undefined,
     );
   }
 
@@ -1321,7 +1362,7 @@ app.post('/api/two-factor/get-recover', async (c) => {
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  return c.json({ code: a.user.totpRecover ?? null, object: 'twoFactorRecover' });
+  return c.json({ code: openSecret(c.env, a.user.totpRecover) ?? null, object: 'twoFactorRecover' });
 });
 
 // ---------------------------------------------------------------- account ops
@@ -1756,6 +1797,11 @@ let uid;
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param('id')) return c.json({ error: 'not found' }, 404);
 
+  // 附件票据同样限次，降低"链接进日志后可被反复拉取"的风险
+  if (token.split('.').length === 2 && !(await consumeToken(store, token, { maxUses: 5, ttlSec: 900 }))) {
+    return c.json({ error: 'attachment token already used' }, 401);
+  }
+
   const res = await streamBinary(c, store, keys.attachmentData(uid, meta.id), 'application/octet-stream', {
     'content-disposition': `attachment; filename="${encodeURIComponent(meta.fileName)}"`,
   });
@@ -2162,7 +2208,9 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
 // 真正吐字节的地方：网页版用上一步返回的 url 直接 fetch（不带 header），
 // 所以这里用查询串里的短期令牌鉴权。
 app.get('/api/sends/access/file/:fileId/data', async (c) => {
-  const token = String(c.req.query('token') ?? '');
+  // 兼容两种带法：优先 Authorization（不进日志），退回 query（网页版那次 fetch 不带头）
+  const auth = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
+  const token = String(c.req.query('token') ?? (auth ? auth[1] : ''));
   let payload;
   try {
     payload = await verifyAccess(c.env, token);
@@ -2180,6 +2228,11 @@ app.get('/api/sends/access/file/:fileId/data', async (c) => {
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+
+  // 票据限次使用：即使 URL 进了日志/历史，也无法被反复重放
+  if (!(await consumeToken(store, token, { maxUses: 5, ttlSec: 900 }))) {
+    return c.json({ error: 'access token already used', message: 'access token already used', statusCode: 401 }, 401);
+  }
 
   // 计数放在真正吐字节这一步：文件 Send 的下载上限才真正生效
   // （此前只在 /sends/access/<accessId> 里加，绕过那条路径就完全不计）
@@ -2740,7 +2793,7 @@ app.get('/api/auth-requests/:id/response', async (c) => {
   if (
     Number(ar.deviceType) !== requestDeviceType(c) ||
     ar.requestIp !== requestIp(c) ||
-    String(ar.accessCode) !== code
+    !safeEqual(ar.accessCode, code)
   ) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
   }

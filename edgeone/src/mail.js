@@ -45,6 +45,13 @@ function transport(env) {
   return cache.get(id);
 }
 
+// 日志里不带完整收件人地址（PII），只留首字母和域名，便于排查又不过度暴露
+const maskEmail = (addr) => {
+  const s = String(addr ?? '');
+  const at = s.indexOf('@');
+  if (at <= 0) return s ? '***' : '';
+  return `${s.slice(0, 1)}***${s.slice(at)}`;
+};
 const escapeHtml = (s) =>
   String(s)
     .replace(/&/g, '&amp;')
@@ -101,7 +108,7 @@ export async function sendMail(env, { to, subject, text, html }) {
     html,
   });
   // 保留服务商返回码：SES 的拒信原因只能从这里看到
-  console.log('[mail] sent', { to, messageId: info.messageId, response: info.response });
+  console.log('[mail] sent', { to: maskEmail(to), messageId: info.messageId, response: info.response });
   return { messageId: info.messageId, response: info.response };
 }
 

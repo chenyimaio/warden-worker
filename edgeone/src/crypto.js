@@ -2,7 +2,7 @@
 // 与 warden-worker（Rust）对齐的最小密码学集合：
 //  - 服务端对 masterPasswordHash 再做一层 PBKDF2-SHA256（与 Rust crypto.rs 同思路）
 //  - 访问/刷新令牌：HS256 JWT，claims 形状对齐 Rust auth::Claims
-import { createHash, createHmac, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify } from 'jose';
 
 export const KDF_PBKDF2 = 0;
@@ -197,4 +197,51 @@ export function validateTotp(code, secretB32, lastUsed = 0, allowDrift = false) 
     if (totpAt(secretB32, step) === String(code)) return step;
   }
   throw new Error('Invalid TOTP code');
+}
+/** 常量时间字符串比较（长度不同直接 false，不泄露前缀信息） */
+export function safeEqual(a, b) {
+  const x = Buffer.from(String(a ?? ''));
+  const y = Buffer.from(String(b ?? ''));
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+}
+
+// ---------------------------------------------------------------- 敏感字段落盘加密
+// TOTP 恢复码这类"等同于凭据"的字段，之前是明文躺在 profile 里：只要 Blob 泄露就等于
+// 拿到绕过多因素登录的钥匙。这里用 JWT_SECRET 派生的密钥做 AES-256-GCM 封装，
+// 泄露存储但没拿到 JWT_SECRET 时无法解出。
+const SEAL_LABEL = 'warden/v1/field-encryption';
+const SEAL_PREFIX = 'enc:v1:';
+
+function sealKey(env) {
+  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  if (!base) throw new Error('missing secret: JWT_SECRET');
+  return createHash('sha256').update(`${SEAL_LABEL}:${base}`).digest();
+}
+
+export function sealSecret(env, plaintext) {
+  const text = String(plaintext ?? '');
+  if (!text) return null;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', sealKey(env), iv);
+  const ct = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${SEAL_PREFIX}${Buffer.concat([iv, tag, ct]).toString('base64url')}`;
+}
+
+/** 兼容历史明文数据：解不开或不是封装格式时原样返回 */
+export function openSecret(env, stored) {
+  const raw = String(stored ?? '');
+  if (!raw) return null;
+  if (!raw.startsWith(SEAL_PREFIX)) return raw;
+  try {
+    const buf = Buffer.from(raw.slice(SEAL_PREFIX.length), 'base64url');
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(12, 28);
+    const ct = buf.subarray(28);
+    const d = createDecipheriv('aes-256-gcm', sealKey(env), iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
 }

@@ -13333,7 +13333,7 @@ var cors = (options) => {
 import { createHash as createHash2, pbkdf2Sync as pbkdf2Sync2, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 
 // src/crypto.js
-import { createHash, createHmac as createHmac2, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac as createHmac2, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 
 // node_modules/jose/dist/node/esm/runtime/base64url.js
 import { Buffer as Buffer2 } from "node:buffer";
@@ -14695,6 +14695,43 @@ function validateTotp(code, secretB32, lastUsed = 0, allowDrift = false) {
   }
   throw new Error("Invalid TOTP code");
 }
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a ?? ""));
+  const y = Buffer.from(String(b ?? ""));
+  return x.length === y.length && x.length > 0 && timingSafeEqual2(x, y);
+}
+var SEAL_LABEL = "warden/v1/field-encryption";
+var SEAL_PREFIX = "enc:v1:";
+function sealKey(env) {
+  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  if (!base) throw new Error("missing secret: JWT_SECRET");
+  return createHash("sha256").update(`${SEAL_LABEL}:${base}`).digest();
+}
+function sealSecret(env, plaintext) {
+  const text = String(plaintext ?? "");
+  if (!text) return null;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", sealKey(env), iv);
+  const ct = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
+  const tag2 = cipher.getAuthTag();
+  return `${SEAL_PREFIX}${Buffer.concat([iv, tag2, ct]).toString("base64url")}`;
+}
+function openSecret(env, stored) {
+  const raw2 = String(stored ?? "");
+  if (!raw2) return null;
+  if (!raw2.startsWith(SEAL_PREFIX)) return raw2;
+  try {
+    const buf = Buffer.from(raw2.slice(SEAL_PREFIX.length), "base64url");
+    const iv = buf.subarray(0, 12);
+    const tag2 = buf.subarray(12, 28);
+    const ct = buf.subarray(28);
+    const d = createDecipheriv("aes-256-gcm", sealKey(env), iv);
+    d.setAuthTag(tag2);
+    return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
 
 // src/store.js
 var import_pages_blob = __toESM(require_dist(), 1);
@@ -14904,6 +14941,12 @@ function transport(env) {
   }
   return cache.get(id);
 }
+var maskEmail = (addr) => {
+  const s = String(addr ?? "");
+  const at = s.indexOf("@");
+  if (at <= 0) return s ? "***" : "";
+  return `${s.slice(0, 1)}***${s.slice(at)}`;
+};
 var escapeHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 function passwordHintTemplate({ hint, baseUrl }) {
   const safeHint = String(hint).slice(0, 1e3);
@@ -14946,7 +14989,7 @@ async function sendMail(env, { to, subject, text, html }) {
     text,
     html
   });
-  console.log("[mail] sent", { to, messageId: info.messageId, response: info.response });
+  console.log("[mail] sent", { to: maskEmail(to), messageId: info.messageId, response: info.response });
   return { messageId: info.messageId, response: info.response };
 }
 async function sendPasswordHint(env, { to, hint, baseUrl }) {
@@ -15049,9 +15092,38 @@ var corsOptions = {
   allowHeaders: ["authorization", "content-type", "device-type", "x-device-type", "x-requested-with"],
   maxAge: 600
 };
+app.use("*", async (c, next) => {
+  await next();
+  c.header("referrer-policy", "no-referrer");
+  c.header("x-content-type-options", "nosniff");
+});
 app.use("*", cors(corsOptions));
 var BULK_MAX_IDS = 2e3;
 var IMPORT_MAX_ITEMS = 5e3;
+async function consumeToken(store, token, { maxUses = 5, ttlSec = 900 } = {}) {
+  const id = createHash2("sha256").update(String(token)).digest("hex").slice(0, 32);
+  const key = `tok/${id}.json`;
+  const now = Math.floor(Date.now() / 1e3);
+  const cur = (await store.get(key))?.value;
+  if (cur && Number(cur.exp) >= now && Number(cur.uses ?? 0) >= maxUses) return false;
+  const uses = cur && Number(cur.exp) >= now ? Number(cur.uses ?? 0) + 1 : 1;
+  await store.put(key, { exp: now + ttlSec, uses });
+  if (Math.random() < 0.02) {
+    try {
+      const rows = await store.list("tok/");
+      const stale = [];
+      for (const it of rows) {
+        const v = (await store.get(it.key))?.value;
+        if (!v || Number(v.exp) < now) stale.push(it.key);
+        if (stale.length >= 50) break;
+      }
+      await Promise.all(stale.map((k) => store.del(k).catch(() => {
+      })));
+    } catch {
+    }
+  }
+  return true;
+}
 async function body(c) {
   const ct = c.req.header("content-type") || "";
   if (ct.includes("application/json")) return await c.req.json().catch(() => ({})) ?? {};
@@ -15155,7 +15227,7 @@ async function requireAuth(c) {
   try {
     const claims = await verifyAccess(c.env, m[1]);
     const prof = await getStore2(c.env).get(keys.profile(claims.sub));
-    if (!prof || prof.value.securityStamp !== claims.sstamp) {
+    if (!prof || !safeEqual(prof.value.securityStamp, claims.sstamp)) {
       console.warn("[auth] stamp mismatch", c.req.method, c.req.path, "sub=" + claims.sub, "profile=" + Boolean(prof));
       return { error: c.json({ error: "unauthorized", reason: "stamp_mismatch" }, 401) };
     }
@@ -15358,6 +15430,8 @@ async function register(c) {
   const rl = await limit(c, "register", requestIp(c), 10, 60);
   if (rl) return rl;
   if (!email) return c.json({ error: "invalid email" }, 400);
+  const rlEmail = await limit(c, "register-email", email, 5, 60);
+  if (rlEmail) return rlEmail;
   if (!allowedEmail(c, email)) return c.json({ error: "Not allowed to signup" }, 401);
   const store = getStore2(c.env);
   if (await findUserByEmail(c, email)) return c.json({ error: "email already exists" }, 400);
@@ -15450,7 +15524,7 @@ app.post("/identity/connect/token", async (c) => {
       const ar = (await store.get(keys.authRequest(user.id, authRequestId)))?.value;
       const devId = String(p.device_identifier ?? p.deviceIdentifier ?? "");
       const devType = Number(p.device_type ?? p.deviceType ?? 14);
-      if (!ar || ar.approved !== 1 || ar.requestIp !== requestIp(c) || Number(ar.deviceType) !== devType || ar.requestDeviceIdentifier !== devId || String(ar.accessCode) !== mph) {
+      if (!ar || ar.approved !== 1 || ar.requestIp !== requestIp(c) || Number(ar.deviceType) !== devType || ar.requestDeviceIdentifier !== devId || !safeEqual(ar.accessCode, mph)) {
         return c.json({ error: "invalid_grant", error_description: "Username or access code is incorrect. Try again.", message: "Username or access code is incorrect. Try again.", Message: "Username or access code is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or access code is incorrect. Try again."] } }, 400);
       }
     } else if (!mph || !await checkMasterPassword(c, user, mph)) {
@@ -15487,7 +15561,7 @@ app.post("/identity/connect/token", async (c) => {
           const dev = await store.get(keys.device(user.id, deviceId));
           if (!dev || dev.value.twofactorRemember !== code) throw new Error("remember mismatch");
         } else if (provider === TFA_RECOVERY) {
-          const stored = String(user.totpRecover ?? "");
+          const stored = String(openSecret(c.env, user.totpRecover) ?? "");
           if (!stored || stored.toUpperCase() !== code.trim().toUpperCase()) {
             return c.json({ error: "Recovery code is incorrect" }, 400);
           }
@@ -15551,7 +15625,7 @@ app.post("/identity/connect/token", async (c) => {
     if (!device) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     if (!prof) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     const user = prof.value;
-    if (payload.refreshId !== device.value.refreshId || payload.sstamp !== user.securityStamp) {
+    if (!safeEqual(payload.refreshId, device.value.refreshId) || !safeEqual(payload.sstamp, user.securityStamp)) {
       return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     }
     const accessToken = await signAccess(c.env, {
@@ -16104,7 +16178,7 @@ async function activateAuthenticator(c) {
     await mutate(
       store,
       keys.profile(a.claims.sub),
-      (cur) => cur ? { ...cur, totpRecover: code, updatedAt: nowIso() } : void 0
+      (cur) => cur ? { ...cur, totpRecover: sealSecret(c.env, code), updatedAt: nowIso() } : void 0
     );
   }
   return c.json({ enabled: true, key, object: "twoFactorAuthenticator" });
@@ -16150,7 +16224,7 @@ app.post("/api/two-factor/get-recover", async (c) => {
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  return c.json({ code: a.user.totpRecover ?? null, object: "twoFactorRecover" });
+  return c.json({ code: openSecret(c.env, a.user.totpRecover) ?? null, object: "twoFactorRecover" });
 });
 app.post("/api/accounts/password", async (c) => {
   const a = await requireAuth(c);
@@ -16495,6 +16569,9 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
   const store = getStore2(c.env);
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param("id")) return c.json({ error: "not found" }, 404);
+  if (token.split(".").length === 2 && !await consumeToken(store, token, { maxUses: 5, ttlSec: 900 })) {
+    return c.json({ error: "attachment token already used" }, 401);
+  }
   const res = await streamBinary(c, store, keys.attachmentData(uid, meta.id), "application/octet-stream", {
     "content-disposition": `attachment; filename="${encodeURIComponent(meta.fileName)}"`
   });
@@ -16844,7 +16921,8 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   });
 });
 app.get("/api/sends/access/file/:fileId/data", async (c) => {
-  const token = String(c.req.query("token") ?? "");
+  const auth = (c.req.header("authorization") || "").match(/^Bearer\s+(.+)$/i);
+  const token = String(c.req.query("token") ?? (auth ? auth[1] : ""));
   let payload;
   try {
     payload = await verifyAccess(c.env, token);
@@ -16862,6 +16940,9 @@ app.get("/api/sends/access/file/:fileId/data", async (c) => {
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+  if (!await consumeToken(store, token, { maxUses: 5, ttlSec: 900 })) {
+    return c.json({ error: "access token already used", message: "access token already used", statusCode: 401 }, 401);
+  }
   try {
     await mutate(
       store,
@@ -17326,7 +17407,7 @@ app.get("/api/auth-requests/:id/response", async (c) => {
   const ar = (await store.get(keys.authRequest(hit.userId, hit.id)))?.value;
   if (!ar) return c.json({ error: "AuthRequest doesn't exist" }, 400);
   const code = String(c.req.query("code") ?? "");
-  if (Number(ar.deviceType) !== requestDeviceType(c) || ar.requestIp !== requestIp(c) || String(ar.accessCode) !== code) {
+  if (Number(ar.deviceType) !== requestDeviceType(c) || ar.requestIp !== requestIp(c) || !safeEqual(ar.accessCode, code)) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
   }
   return c.json(authRequestToJson(ar, baseUrlOf(c)));
