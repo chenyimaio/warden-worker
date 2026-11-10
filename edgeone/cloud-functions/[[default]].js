@@ -15127,6 +15127,8 @@ app.use("*", async (c, next) => {
   await next();
   c.header("referrer-policy", "no-referrer");
   c.header("x-content-type-options", "nosniff");
+  c.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+  c.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'");
 });
 app.use("*", cors(corsOptions));
 var BULK_MAX_IDS = 2e3;
@@ -15217,6 +15219,23 @@ async function findUserByEmail(c, email) {
   const p = await store.get(keys.profile(idx.value.userId));
   return p ? { ...p.value } : null;
 }
+var rateSweepTick = 0;
+async function sweepRateKeys(store, now) {
+  rateSweepTick += 1;
+  if (rateSweepTick % 200 !== 0) return;
+  try {
+    const rows = await store.list("rl/");
+    const dead = [];
+    for (const it of rows) {
+      const v = (await store.get(it.key))?.value;
+      if (!v || Number(v.exp ?? 0) < now) dead.push(it.key);
+      if (dead.length >= 50) break;
+    }
+    await Promise.all(dead.map((k) => store.del(k).catch(() => {
+    })));
+  } catch {
+  }
+}
 async function limit(c, kind, id, max, windowSec) {
   const store = getStore2(c.env);
   const digest = createHash2("sha256").update(`${kind}:${id}`).digest("hex").slice(0, 32);
@@ -15231,7 +15250,9 @@ async function limit(c, kind, id, max, windowSec) {
       "retry-after": String(retry)
     });
   }
-  await store.put(key, { start: sameWindow ? cur.start : now, count: count + 1 });
+  const start = sameWindow ? cur.start : now;
+  await store.put(key, { start, count: count + 1, exp: start + windowSec * 1e3 });
+  await sweepRateKeys(store, now);
   return null;
 }
 async function limits(c, specs) {
@@ -15256,9 +15277,11 @@ async function limits(c, specs) {
         })
       };
     }
-    writes.push([key, { start: sameWindow ? cur.start : now, count: count + 1 }]);
+    const start = sameWindow ? cur.start : now;
+    writes.push([key, { start, count: count + 1, exp: start + spec.windowSec * 1e3 }]);
   }
   await Promise.all(writes.map(([k, v]) => store.put(k, v)));
+  await sweepRateKeys(store, now);
   return { blocked: null };
 }
 var HINT_KEYS = ["masterPasswordHint", "hint", "masterPasswordHintB64", ""];
@@ -15588,12 +15611,16 @@ app.post("/identity/connect/token", async (c) => {
     }
     const authRequestId = String(p.authrequest ?? p.authRequest ?? "");
     if (authRequestId) {
+      const timingFill = hashPassword(String(mph ?? ""), "warden-timing-equalizer-salt", pbkdf2Iterations(c)).catch(() => {
+      });
       const ar = (await store.get(keys.authRequest(user.id, authRequestId)))?.value;
       const devId = String(p.device_identifier ?? p.deviceIdentifier ?? "");
       const devType = Number(p.device_type ?? p.deviceType ?? 14);
       if (!ar || ar.approved !== 1 || ar.requestIp !== requestIp(c) || Number(ar.deviceType) !== devType || ar.requestDeviceIdentifier !== devId || !safeEqual(ar.accessCode, mph)) {
+        await timingFill;
         return c.json({ error: "invalid_grant", error_description: "Username or access code is incorrect. Try again.", message: "Username or access code is incorrect. Try again.", Message: "Username or access code is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or access code is incorrect. Try again."] } }, 400);
       }
+      await timingFill;
     } else if (!mph || !await checkMasterPassword(c, user, mph)) {
       return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
     }
@@ -16239,7 +16266,8 @@ async function activateAuthenticator(c) {
     atype: TFA_AUTHENTICATOR,
     enabled: true,
     data: key,
-    lastUsed: step
+    // 激活时不占用当前时间步：否则刚开完两步验证立刻登录必然失败，得等 30 秒
+    lastUsed: 0
   });
   if (!a.user.totpRecover) {
     const code = generateRecoveryCode();
@@ -16538,7 +16566,6 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
       413
     );
   }
-  const direct = null;
   const meta = {
     id,
     cipherId,
@@ -16558,9 +16585,10 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   );
   return c.json({
     attachmentId: id,
-    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
-    // 1 = AZURE（客户端 PUT 到 url）；0 = DIRECT（客户端 POST 到 url）
-    fileUploadType: direct ? 1 : 0,
+    // 没有对象存储的预签名能力：一律让客户端把字节 POST 回本函数（DIRECT）。
+    // fileUploadType 0 = DIRECT（POST 到 url），1 = AZURE（PUT 到 url）。
+    url: `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
+    fileUploadType: 0,
     cipherResponse: cipherToJson(touched ?? cipher, attachments)
   });
 });
@@ -16680,7 +16708,22 @@ app.post("/api/ciphers/:id/attachment/:aid/delete", deleteAttachment);
 var SEND_TEXT = 0;
 var SEND_FILE = 1;
 var SEND_PASSWORD_ITER = 1e5;
-var accessIdFromUuid = (id) => Buffer.from(String(id).replace(/-/g, ""), "hex").toString("base64url");
+var SEND_ID_RE = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+var accessIdFromUuid = (id) => {
+  const s = String(id ?? "");
+  if (!SEND_ID_RE.test(s)) return null;
+  return Buffer.from(s.replace(/-/g, ""), "hex").toString("base64url");
+};
+var SEND_INDEX_CONFLICT = /* @__PURE__ */ Symbol("send-index-conflict");
+async function claimSendIndex(store, s, userId, id) {
+  const key = keys.sendIndex(s);
+  const cur = (await store.get(key))?.value;
+  if (cur && !(String(cur.userId) === String(userId) && String(cur.id) === String(id))) {
+    return SEND_INDEX_CONFLICT;
+  }
+  await store.put(key, { userId, id });
+  return null;
+}
 function pbkdf2B64url(value, saltB64, iterations) {
   return pbkdf2Sync(String(value), Buffer.from(saltB64, "base64url"), iterations, 32, "sha256").toString(
     "base64url"
@@ -16823,8 +16866,12 @@ async function createTextSend(c) {
     ...sendPasswordHash(p.password)
   };
   const store = getStore2(c.env);
+  const accessId = accessIdFromUuid(id);
+  if (!accessId) return c.json({ error: "invalid send id" }, 400);
+  if (await claimSendIndex(store, accessId, a.claims.sub, id) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: "send id already in use", statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
   return c.json(sendToJson(send));
 }
@@ -16864,7 +16911,12 @@ app.delete("/api/sends/:id", async (c) => {
   const store = getStore2(c.env);
   const id = c.req.param("id");
   await store.del(keys.send(a.claims.sub, id));
-  await store.del(keys.sendIndex(accessIdFromUuid(id)));
+  const accessId = accessIdFromUuid(id);
+  if (accessId) {
+    const idxKey = keys.sendIndex(accessId);
+    const idx = (await store.get(idxKey))?.value;
+    if (idx && String(idx.userId) === String(a.claims.sub)) await store.del(idxKey);
+  }
   await touchUser(store, a.claims.sub);
   return c.json({});
 });
@@ -16884,7 +16936,7 @@ async function lookupSendByAccessId(store, idOrAccessId) {
   let hit = (await store.get(keys.sendIndex(idOrAccessId)))?.value;
   if (!hit) {
     const asAccess = accessIdFromUuid(idOrAccessId);
-    hit = (await store.get(keys.sendIndex(asAccess)))?.value;
+    if (asAccess) hit = (await store.get(keys.sendIndex(asAccess)))?.value;
   }
   if (!hit) return null;
   return (await store.get(keys.send(hit.userId, hit.id)))?.value ?? null;
@@ -17083,8 +17135,12 @@ app.post("/api/sends/file/v2", async (c) => {
     );
   }
   const store = getStore2(c.env);
+  const accessId = accessIdFromUuid(id);
+  if (!accessId) return c.json({ error: "invalid send id" }, 400);
+  if (await claimSendIndex(store, accessId, a.claims.sub, id) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: "send id already in use", statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
@@ -17591,8 +17647,16 @@ app.post("/api/sends/file", async (c) => {
     hideEmail: false,
     ...sendPasswordHash(f.password)
   };
+  const legacyAccessId = accessIdFromUuid(id);
+  if (!legacyAccessId) return c.json({ error: "invalid send id" }, 400);
+  const legacyMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
+  if (legacyMax && up.bytes.length > legacyMax) {
+    return c.json({ error: "File too large", limit: legacyMax }, 413);
+  }
+  if (await claimSendIndex(store, legacyAccessId, a.claims.sub, id) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: "send id already in use", statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await store.putBinary(keys.sendFile(a.claims.sub, id), up.bytes);
   await touchUser(store, a.claims.sub);
   return c.json(sendToJson(send));
@@ -17709,7 +17773,19 @@ async function deleteAccount(c) {
   for (const it of items) {
     if (!it.key.includes("/sends/") || !it.key.endsWith(".json")) continue;
     const v = (await store.get(it.key))?.value;
-    if (v?.id) await store.del(keys.sendIndex(accessIdFromUuid(v.id)));
+    if (v?.id) {
+      const sendAccess = accessIdFromUuid(v.id);
+      if (sendAccess) {
+        const idxKey = keys.sendIndex(sendAccess);
+        const idx = (await store.get(idxKey))?.value;
+        if (idx && String(idx.userId) === String(a.claims.sub)) await store.del(idxKey);
+      }
+    }
+  }
+  for (const it of items) {
+    if (!it.key.includes("/auth-requests/") || !it.key.endsWith(".json")) continue;
+    const v = (await store.get(it.key))?.value;
+    if (v?.id) await store.del(keys.authRequestIndex(v.id));
   }
   for (const it of items) await store.del(it.key);
   await store.del(keys.email(emailKey(a.user.email)));

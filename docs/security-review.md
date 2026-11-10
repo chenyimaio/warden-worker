@@ -105,6 +105,78 @@
 
 新增回归（smoke 第 30 节）：chunked 5 MiB → 413、body id 穿越 → 400、重复 id → 409 JSON、坏 JSON → 400、附件票据改密后失效。
 
+---
+
+## 十一、第四轮审计复核结果
+
+这一轮最严重的一条**完整复现**，其余逐条确认。
+
+### H-1 Send 分享链接可被他人劫持（已复现，已修复）
+
+复现脚本输出（修前）：
+
+```
+Alice accessId=Lv9_l0ZHQp2cKqdmsr_MCQ
+Bob 构造 id=2eff7f974647429d9c2aa766b2bfcc09
+Bob 建 -> 200 | accessId=Lv9_l0ZHQp2cKqdmsr_MCQ | 与Alice相同=true
+匿名访问 Alice 链接 -> 200 | name=BOB-OVERWRITE
+Bob 删除自己那条 -> 200
+Alice 链接现在 -> 404
+```
+
+三个条件叠加才成立：
+
+1. `accessId` 是 `id` 的 16 字节 hex → base64url，**可逆**，所以 `hex(别人的 accessId)` 就是一个能算出同一 accessId 的 id；
+2. `validId` 允许 32 位十六进制，这个 id 能通过校验；
+3. 写索引是普通 `put`，直接覆盖；删除时又按同一公式删索引，**不校验归属**。
+
+修法（三处一起）：
+
+```js
+// 1) id 必须是 32 位 hex 或标准 UUID；非十六进制不再静默截断
+const SEND_ID_RE = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-...)$/i;
+const accessIdFromUuid = (id) => SEND_ID_RE.test(String(id ?? '')) ? Buffer.from(...).toString('base64url') : null;
+
+// 2) 写索引前先读：要么不存在，要么就是我自己这条
+async function claimSendIndex(store, s, userId, id) {
+  const cur = (await store.get(keys.sendIndex(s)))?.value;
+  if (cur && !(cur.userId === userId && cur.id === id)) return SEND_INDEX_CONFLICT;
+  await store.put(keys.sendIndex(s), { userId, id });
+}
+
+// 3) 删索引前校验 userId
+if (idx && String(idx.userId) === String(a.claims.sub)) await store.del(idxKey);
+```
+
+修后：
+
+```
+Bob 用 hex(accessId) 建 Send -> 409（已拦）
+Alice 链接内容 name=ALICE-SECRET
+Bob 删除 -> 200
+Alice 链接仍然 -> 200
+```
+
+### 其余条目
+
+| 编号 | 复现结果 | 处置 |
+|---|---|---|
+| M-1 旧 multipart 不校验 id | **成立**：`id=../../profile` → `200`，`accessId=""`，索引键退化成全局的 `idx/send/.json` | 加 id 校验（400）+ `claimSendIndex` + `UPLOAD_MAX_BYTES` 上限 |
+| M-2 `accessIdFromUuid` 静默截断 | **成立**：`id=zzzz` → `400`（修后）；修前产生空 accessId | 严格正则，非 hex 直接返回 null，调用点全部判空 |
+| M-3 限流键空间无上界 | **成立**：换一个伪造 IP 就新建一个 `rl/` 对象，永不过期 | 计数对象写入 `exp`，并每 200 次调用低频清理一次过期键。**非原子性仍接受**（Blob 无条件写，见 L-5） |
+| M-4 authrequest 反向时序 | **成立**：已知账号 1 ms（走 accessCode 分支），未知账号 78 ms | 该分支也做一次等价代价哈希。修后两边 **13–15 ms** |
+| M-5 prelogin 真实 KDF + 注册提示 | 成立（前几轮已记录） | 协议决定 + 限流，见第九节 |
+| 低危：DELETE 返回 200 | 成立，但**删的是 `u/{自己}/...` 路径**，删不到他人数据；幂等 200 是 REST 惯例 | 保留 |
+| 低危：删号不清 idx/authreq | 成立 | 删号时一并清理 `sendIndex`（校验归属）与 `authRequestIndex` |
+| 低危：2FA 激活消耗当前 step | 成立：刚激活立刻登录必然失败 | 激活写 `lastUsed: 0`，不再占用当前时间步 |
+| 低危：旧 multipart 无大小上限 | 成立 | 加 `UPLOAD_MAX_BYTES` 检查（413） |
+| 低危：`direct=null` 与文档不符 | 成立（是死变量，但被 `fileUploadType` 引用） | 内联成常量 0，注释说明"没有对象存储预签名能力，一律 DIRECT" |
+| 低危：缺 HSTS/CSP | 成立 | 加 `Strict-Transport-Security` 与 `default-src 'none'` 的 CSP（函数只返回 JSON 和自带 404 页） |
+| 低危：`test-entry.mjs` 引用不存在文件 | 成立 | 已删除（上一轮） |
+
+新增回归（smoke 第 31 节）：hex(对方 accessId) 建 Send → 409、Alice 链接内容不被替换、删除不影响他人、非 hex / 穿越 id → 400、旧 multipart 通道同样 400。
+
+
 
 
 回归用例已加入 `scripts/smoke.mjs`（第 27、28 节）：带密码文件 Send 的匿名/错误密码/带票据三条路径，以及"只凭 token 改密被拒""网页版结构改密成功且新密码可登录"。

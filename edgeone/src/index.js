@@ -97,6 +97,9 @@ app.use('*', async (c, next) => {
   await next();
   c.header('referrer-policy', 'no-referrer');
   c.header('x-content-type-options', 'nosniff');
+  c.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+  // 函数只返回 JSON 和自带的 404 页，不需要任何外部资源
+  c.header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'");
 });
 
 app.use('*', cors(corsOptions));
@@ -212,6 +215,25 @@ async function findUserByEmail(c, email) {
 /**
  * ?Blob/lob 
  * ?? *  null ?429 ? */
+// 限流键是 rl/{kind}/{hash(ip)}：换一个伪造 IP 就新建一个对象，键空间没有上界。
+// 这里低频清理已过期的计数对象，避免存储被慢慢撑大（每 200 次限流调用做一次）。
+let rateSweepTick = 0;
+async function sweepRateKeys(store, now) {
+  rateSweepTick += 1;
+  if (rateSweepTick % 200 !== 0) return;
+  try {
+    const rows = await store.list('rl/');
+    const dead = [];
+    for (const it of rows) {
+      const v = (await store.get(it.key))?.value;
+      if (!v || Number(v.exp ?? 0) < now) dead.push(it.key);
+      if (dead.length >= 50) break;
+    }
+    await Promise.all(dead.map((k) => store.del(k).catch(() => {})));
+  } catch {
+    /* 清理失败不影响限流本身 */
+  }
+}
 async function limit(c, kind, id, max, windowSec) {
   const store = getStore(c.env);
   const digest = createHash('sha256').update(`${kind}:${id}`).digest('hex').slice(0, 32);
@@ -226,7 +248,9 @@ async function limit(c, kind, id, max, windowSec) {
       'retry-after': String(retry),
     });
   }
-  await store.put(key, { start: sameWindow ? cur.start : now, count: count + 1 });
+  const start = sameWindow ? cur.start : now;
+  await store.put(key, { start, count: count + 1, exp: start + windowSec * 1000 });
+  await sweepRateKeys(store, now);
   return null;
 }
 
@@ -257,9 +281,11 @@ async function limits(c, specs) {
         }),
       };
     }
-    writes.push([key, { start: sameWindow ? cur.start : now, count: count + 1 }]);
+    const start = sameWindow ? cur.start : now;
+    writes.push([key, { start, count: count + 1, exp: start + spec.windowSec * 1000 }]);
   }
   await Promise.all(writes.map(([k, v]) => store.put(k, v)));
+  await sweepRateKeys(store, now);
   return { blocked: null };
 }
 
@@ -653,6 +679,10 @@ app.post('/identity/connect/token', async (c) => {
     // login with deviceassword  access code
 const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     if (authRequestId) {
+      // 这条分支不校验主密码（用的是 accessCode），原本 1ms 就返回；
+      // 而未知邮箱要走一次均衡哈希（~78ms）—— 反差同样能枚举账号。
+      // 这里照样做一次等价代价的哈希，结果丢弃。
+      const timingFill = hashPassword(String(mph ?? ''), 'warden-timing-equalizer-salt', pbkdf2Iterations(c)).catch(() => {});
       const ar = (await store.get(keys.authRequest(user.id, authRequestId)))?.value;
       const devId = String(p.device_identifier ?? p.deviceIdentifier ?? '');
       const devType = Number(p.device_type ?? p.deviceType ?? 14);
@@ -664,8 +694,10 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
         ar.requestDeviceIdentifier !== devId ||
         !safeEqual(ar.accessCode, mph)
       ) {
+        await timingFill;
         return c.json({ error: 'invalid_grant', error_description: 'Username or access code is incorrect. Try again.', message: 'Username or access code is incorrect. Try again.', Message: 'Username or access code is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or access code is incorrect. Try again.'] } }, 400);
       }
+      await timingFill;
     } else if (!mph || !(await checkMasterPassword(c, user, mph))) {
       return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
     }
@@ -1385,7 +1417,8 @@ async function activateAuthenticator(c) {
     atype: TFA_AUTHENTICATOR,
     enabled: true,
     data: key,
-    lastUsed: step,
+    // 激活时不占用当前时间步：否则刚开完两步验证立刻登录必然失败，得等 30 秒
+    lastUsed: 0,
   });
 
 // generate recovery code on first TOTP activation
@@ -1763,8 +1796,6 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
       413,
     );
   }
-  const direct = null;
-
   const meta = {
     id,
     cipherId,
@@ -1787,9 +1818,10 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
 
   return c.json({
     attachmentId: id,
-    url: direct ?? `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
-    // 1 = AZURE（客户端 PUT 到 url）；0 = DIRECT（客户端 POST 到 url）
-    fileUploadType: direct ? 1 : 0,
+    // 没有对象存储的预签名能力：一律让客户端把字节 POST 回本函数（DIRECT）。
+    // fileUploadType 0 = DIRECT（POST 到 url），1 = AZURE（PUT 到 url）。
+    url: `${baseUrlOf(c)}/api/ciphers/${cipherId}/attachment/${id}/data`,
+    fileUploadType: 0,
     cipherResponse: cipherToJson(touched ?? cipher, attachments),
   });
 });
@@ -1936,7 +1968,31 @@ const SEND_TEXT = 0;
 const SEND_FILE = 1;
 const SEND_PASSWORD_ITER = 100000;
 
-const accessIdFromUuid = (id) => Buffer.from(String(id).replace(/-/g, ''), 'hex').toString('base64url');
+// Send 的 accessId 是从 id 的 16 字节派生出来的，所以 id 必须是 32 位十六进制或标准 UUID。
+// 之前的实现用 Buffer.from(x,'hex')，对非十六进制是「静默截断」：'zzzz' 会得到一个空
+// accessId，进而把索引写到全局共享的 idx/send/.json 上。这里改成严格判定。
+const SEND_ID_RE =
+  /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+const accessIdFromUuid = (id) => {
+  const s = String(id ?? '');
+  if (!SEND_ID_RE.test(s)) return null;
+  return Buffer.from(s.replace(/-/g, ''), 'hex').toString('base64url');
+};
+
+// 索引键是全局的（idx/send/{accessId}），所以写入前必须确认
+// 「要么不存在，要么就是我自己这条」——否则任何人都能用
+// id = hex(别人的 accessId) 把对方的分享链接顶掉。
+const SEND_INDEX_CONFLICT = Symbol('send-index-conflict');
+async function claimSendIndex(store, s, userId, id) {
+  const key = keys.sendIndex(s);
+  const cur = (await store.get(key))?.value;
+  if (cur && !(String(cur.userId) === String(userId) && String(cur.id) === String(id))) {
+    return SEND_INDEX_CONFLICT;
+  }
+  await store.put(key, { userId, id });
+  return null;
+}
 
 function pbkdf2B64url(value, saltB64, iterations) {
   return pbkdf2Sync(String(value), Buffer.from(saltB64, 'base64url'), iterations, 32, 'sha256').toString(
@@ -2098,8 +2154,12 @@ async function createTextSend(c) {
   };
 
   const store = getStore(c.env);
+  const accessId = accessIdFromUuid(id);
+  if (!accessId) return c.json({ error: 'invalid send id' }, 400);
+  if ((await claimSendIndex(store, accessId, a.claims.sub, id)) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: 'send id already in use', statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: '*' });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
   return c.json(sendToJson(send));
 }
@@ -2142,7 +2202,13 @@ app.delete('/api/sends/:id', async (c) => {
   const store = getStore(c.env);
   const id = c.req.param('id');
   await store.del(keys.send(a.claims.sub, id));
-  await store.del(keys.sendIndex(accessIdFromUuid(id)));
+  // 只删属于自己的索引：否则任何人删自己的 Send 就能把别人的分享链接打断
+  const accessId = accessIdFromUuid(id);
+  if (accessId) {
+    const idxKey = keys.sendIndex(accessId);
+    const idx = (await store.get(idxKey))?.value;
+    if (idx && String(idx.userId) === String(a.claims.sub)) await store.del(idxKey);
+  }
   await touchUser(store, a.claims.sub);
   return c.json({});
 });
@@ -2166,7 +2232,7 @@ async function lookupSendByAccessId(store, idOrAccessId) {
 let hit = (await store.get(keys.sendIndex(idOrAccessId)))?.value;
   if (!hit) {
     const asAccess = accessIdFromUuid(idOrAccessId);
-    hit = (await store.get(keys.sendIndex(asAccess)))?.value;
+    if (asAccess) hit = (await store.get(keys.sendIndex(asAccess)))?.value;
   }
   if (!hit) return null;
   return (await store.get(keys.send(hit.userId, hit.id)))?.value ?? null;
@@ -2410,8 +2476,12 @@ app.post('/api/sends/file/v2', async (c) => {
   }
 
   const store = getStore(c.env);
+  const accessId = accessIdFromUuid(id);
+  if (!accessId) return c.json({ error: 'invalid send id' }, 400);
+  if ((await claimSendIndex(store, accessId, a.claims.sub, id)) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: 'send id already in use', statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: '*' });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await touchUser(store, a.claims.sub);
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
@@ -3023,8 +3093,17 @@ app.post('/api/sends/file', async (c) => {
     hideEmail: false,
     ...sendPasswordHash(f.password),
   };
+  // 旧 multipart 通道：同样要校验 id、占用索引前先查冲突、并遵守上传大小上限
+  const legacyAccessId = accessIdFromUuid(id);
+  if (!legacyAccessId) return c.json({ error: 'invalid send id' }, 400);
+  const legacyMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
+  if (legacyMax && up.bytes.length > legacyMax) {
+    return c.json({ error: 'File too large', limit: legacyMax }, 413);
+  }
+  if ((await claimSendIndex(store, legacyAccessId, a.claims.sub, id)) === SEND_INDEX_CONFLICT) {
+    return c.json({ error: 'send id already in use', statusCode: 409 }, 409);
+  }
   await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: '*' });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
   await store.putBinary(keys.sendFile(a.claims.sub, id), up.bytes);
   await touchUser(store, a.claims.sub);
   return c.json(sendToJson(send));
@@ -3142,11 +3221,24 @@ async function deleteAccount(c) {
   const root = `u/${a.claims.sub}/`;
   const items = await store.list(root);
 
-// drop the Send accessId index first (derived from id), then the rest
-for (const it of items) {
+  // drop the Send accessId index first (derived from id), then the rest
+  for (const it of items) {
     if (!it.key.includes('/sends/') || !it.key.endsWith('.json')) continue;
     const v = (await store.get(it.key))?.value;
-    if (v?.id) await store.del(keys.sendIndex(accessIdFromUuid(v.id)));
+    if (v?.id) {
+      const sendAccess = accessIdFromUuid(v.id);
+      if (sendAccess) {
+        const idxKey = keys.sendIndex(sendAccess);
+        const idx = (await store.get(idxKey))?.value;
+        if (idx && String(idx.userId) === String(a.claims.sub)) await store.del(idxKey);
+      }
+    }
+  }
+  // 登录批准用的索引是全局键（idx/authreq/{id}），删号时必须一起清掉，否则会留垃圾
+  for (const it of items) {
+    if (!it.key.includes('/auth-requests/') || !it.key.endsWith('.json')) continue;
+    const v = (await store.get(it.key))?.value;
+    if (v?.id) await store.del(keys.authRequestIndex(v.id));
   }
   for (const it of items) await store.del(it.key);
 

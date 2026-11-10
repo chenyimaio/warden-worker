@@ -985,6 +985,68 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('改密后同一附件票据 -> 401', dead5.status === 401, dead5);
 }
 
+// 31. 安全回归（第四轮审计）：Send 分享链接不能被他人顶掉 / id 必须合法
+{
+  const mkUser = async (tag) => {
+    const addr = `${tag}-${Date.now()}@example.com`;
+    await call('POST', '/api/accounts/register', {
+      body: {
+        email: addr, masterPasswordHash: `${tag}-mph`, userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    return (await call('POST', '/identity/connect/token', {
+      form: {
+        grant_type: 'password', username: addr, password: `${tag}-mph`, scope: 'api offline_access',
+        client_id: 'web', deviceType: '10', deviceIdentifier: `dev-${tag}`, deviceName: tag,
+      },
+    })).data?.access_token;
+  };
+  const alice = await mkUser('alice');
+  const bob = await mkUser('bob');
+
+  r = await call('POST', '/api/sends', {
+    token: alice,
+    body: { type: 0, key: 'k', name: 'ALICE-SECRET', text: { text: 'secret' }, deletionDate: del },
+  });
+  const aliceAccess = r.data?.accessId;
+  check('Alice 建 Send', r.status === 200 && !!aliceAccess, r);
+
+  // accessId 是公开的；用 hex(accessId) 当 id 可以算出同一个 accessId
+  const hijackId = Buffer.from(String(aliceAccess), 'base64url').toString('hex');
+  r = await call('POST', '/api/sends', {
+    token: bob,
+    body: { id: hijackId, type: 0, key: 'k2', name: 'BOB-OVERWRITE', text: { text: 'bob' }, deletionDate: del },
+  });
+  check('用 hex(对方 accessId) 建 Send -> 409', r.status === 409, r);
+
+  r = await call('POST', `/api/sends/access/${aliceAccess}`, { body: {} });
+  check('Alice 的链接内容没被替换', r.data?.name === 'ALICE-SECRET', r);
+
+  r = await call('DELETE', `/api/sends/${hijackId}`, { token: bob });
+  const afterDel = await call('POST', `/api/sends/access/${aliceAccess}`, { body: {} });
+  check('Bob 删除自己的 Send 不影响 Alice 链接', afterDel.status === 200, afterDel);
+
+  // id 必须是 32 位十六进制或 UUID
+  r = await call('POST', '/api/sends', { token: bob, body: { id: 'zzzz', type: 0, key: 'k', name: 'x', text: { text: 'x' }, deletionDate: del } });
+  check('非十六进制 send id -> 400', r.status === 400, r);
+  r = await call('POST', '/api/sends', { token: bob, body: { id: '../../profile', type: 0, key: 'k', name: 'x', text: { text: 'x' }, deletionDate: del } });
+  check('路径穿越 send id -> 400', r.status === 400, r);
+
+  // 旧 multipart 通道同样要校验
+  const fd = new FormData();
+  fd.append('id', '../../profile');
+  fd.append('type', '1');
+  fd.append('name', 'legacy');
+  fd.append('deletionDate', del);
+  fd.append('file', new Blob([Buffer.from('x')]), 'x.bin');
+  const legacyRes = await app.fetch(
+    new Request('http://localhost/api/sends/file', { method: 'POST', headers: { authorization: `Bearer ${bob}` }, body: fd }),
+    env,
+  );
+  check('旧 multipart 通道 id=../../profile -> 400', legacyRes.status === 400, legacyRes.status);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {
