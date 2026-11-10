@@ -124,14 +124,23 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 > 参考：客户端的 `fileUploadType` 序列化值是反直觉的（`"0"` = `DIRECT` 走服务端，`"1"` = `AZURE` 用返回的 url），这是在 2026.8 安卓客户端 dex 里确认的；即便用直传绕过上传限制，下载仍然过不了响应体限制。
 ### 4.4 网页版（构建期，改了要重新部署）
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `WEB_VAULT_VERSION` | `v2026.10.1` | 仅在**手动刷新**网页版时用（`npm run webvault`），决定拉哪个版本。部署构建不读它 |
-| `WEB_VAULT_BASE_URL` | GitHub 官方 release | 同上，换下载源（拉 GitHub 慢时用镜像） |
-| `WEB_VAULT_TARBALL` | 无 | 同上，指向本地 tar 包，跳过下载（离线/内网用） |
+网页版产物已入库（`edgeone/public/`，267 个文件，约 80 MB），**部署构建不下载、也不需要任何配置**：
+访问 `/` 就是登录页。
 
-> 网页版产物已入库（`edgeone/public/`，267 个文件），**部署构建不再下载**，所以不需要配置任何开关。
-> 要升级网页版：下好 tar 包 → `WEB_VAULT_TARBALL=... npm run webvault` → 提交 `edgeone/public/` 的变更。
+升级网页版只有一个开关 `WEB_VAULT_VERSION`：
+
+| 值 | 行为 |
+|---|---|
+| 不设置 | 什么都不做，继续用仓库里已入库的版本 |
+| `v2026.10.1` | 拉取该版本 |
+| `/tmp/bw_web_v2026.10.1.tar.gz` | 用本地包，不联网 |
+
+```bash
+cd edgeone
+npm run webvault                                   # 不设置 = 只报告当前版本，列不改任何文件
+WEB_VAULT_VERSION=/tmp/bw_web_v2026.10.1.tar.gz npm run webvault   # 升级
+git add public && git commit -m "chore(web-vault): bump to v2026.10.1"
+```
 
 ### 4.5 邮件（**全部可选**）
 

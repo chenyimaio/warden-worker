@@ -122,19 +122,19 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 网页版产物已经提交在 `edgeone/public/`（267 个文件，约 80 MB），部署构建**不再下载**，
 所以这里没有任何开关要配。直接访问 `/` 就是网页版登录页。
 
-升级网页版时（手动操作，构建期不会自动跑）：
+升级网页版只有一个变量 `WEB_VAULT_VERSION`：
+
+| 值 | 行为 |
+|---|---|
+| 不设置 | 什么都不做，继续用仓库里已入库的版本 |
+| `v2026.10.1` | 拉取该版本 |
+| `/tmp/bw_web_v2026.10.1.tar.gz` | 用本地包，不联网 |
 
 ```bash
 cd edgeone
-WEB_VAULT_TARBALL=/path/bw_web_v2026.10.1.tar.gz npm run webvault
+WEB_VAULT_VERSION=/path/bw_web_v2026.10.1.tar.gz npm run webvault
 git add public && git commit -m "chore(web-vault): bump to vX"
 ```
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `WEB_VAULT_VERSION` | `v2026.10.1` | 仅刷新脚本用，决定拉哪个版本 |
-| `WEB_VAULT_BASE_URL` | GitHub Releases | 仅刷新脚本用，换镜像源（国内拉不动 GitHub 时） |
-| `WEB_VAULT_TARBALL` | 无 | 仅刷新脚本用，指向本地 tar 包，跳过下载 |
 
 ### 4.5 邮件（全部可选）
 

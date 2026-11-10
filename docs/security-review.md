@@ -800,7 +800,7 @@ if (!v) throw new Error(`missing secret: ${name}`);
 | L-6 | `index.js:1276` 附近 | `PASSWORD_ITERATIONS` 无下限，设成 `0` 会让 `pbkdf2Sync` 抛 `RangeError` → 500 | `Math.max(60000, ...)` 兜底 |
 | L-7 | `index.js:448,568` | TOTP 恢复码以**明文**存于 `profile.totpRecover` | 与 Vaultwarden 一致；若在意可以存哈希（比对时哈希化） |
 | L-8 | `mail.js:111` | `[mail] sent` 日志写入收件人邮箱 | 属于 PII，按需脱敏 |
-| L-9 | `scripts/fetch-web-vault.mjs:104-114` | 构建期校验的 `sha256sums.txt` 与 tarball **同源**；缺条目时只告警不失败；`WEB_VAULT_BASE_URL` 指向的镜像被完全信任 | 把期望哈希写进仓库（可锁定版本）；镜像源至少在文档里标注"必须是你信任的源" |
+| L-9 | `scripts/fetch-web-vault.mjs:104-114` | 构建期校验的 `sha256sums.txt` 与 tarball **同源**；缺条目时只告警不失败；`WEB_VAULT_BASE_URL` 指向的镜像被完全信任 | 把期望哈希写进仓库（可锁定版本）；镜像源至少在文档里标注"必须是你信任的源"。**已收口**：产物改为入库，构建不再下载；`WEB_VAULT_BASE_URL` 变量已删除，下载地址硬编码为官方 release，只保留一个只在手动升级时生效的 `WEB_VAULT_VERSION` |
 
 > L-9 补充：网页版是在密码库同源下运行的第三方构建产物，一旦构建期被投毒，等于给主密码开了后门。当前"同源取校验和"只能防传输损坏，防不了源被篡改。
 

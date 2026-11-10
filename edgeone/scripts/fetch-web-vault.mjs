@@ -4,19 +4,18 @@
 // 放在根目录而不是 public/vault/：EdgeOne 的静态层不对子目录做 index 解析，
 // 放根目录时 / 天然就是入口，不需要任何重定向。
 //
-// **这个脚本现在只在手动刷新网页版时运行**（npm run webvault）。
-// 产物已经入库，部署构建不再调用它 —— 构建不需要网络，产物也能被 review。
-// 更新流程：先下好 tar 包，再用 WEB_VAULT_TARBALL 指过去，跑完提交 public/ 的变更。
+// **产物已入库，部署构建不调用这个脚本。** 它只在手动升级网页版时跑。
 //
-// 环境变量：
-//   WEB_VAULT_TARBALL  本地 tar 包路径（跳过下载；离线/内网构建用这个）
-//   WEB_VAULT_VERSION  指定版本，默认 v2026.10.1
-//   WEB_VAULT_BASE_URL 下载源前缀（默认 GitHub Release；国内下载慢/不通时可换镜像）
-//   OUT_DIR            输出目录，默认 <repo>/edgeone/public（站点根，测试时可覆盖）
+// 只有一个开关 WEB_VAULT_VERSION：
+//   不设置        -> 什么都不做，继续用仓库里已入库的 public/
+//   设置版本号    -> 拉取该版本（例：WEB_VAULT_VERSION=v2026.10.1）
+//   设置 tar 路径 -> 用本地包，不联网（例：WEB_VAULT_VERSION=/tmp/bw_web_v2026.10.1.tar.gz）
+//
+// 其他内部开关（一般不用动）：
+//   OUT_DIR            输出目录，默认 <repo>/edgeone/public
 //   VAULT_MAX_FILE_MB  单个文件上限（默认 20），超过的文件会被删掉
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
-// 落地页会探测 /vault/index.html，构建失败时不会把用户重定向到空目录。
 import { copyFileSync, createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -27,16 +26,25 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const VERSION = process.env.WEB_VAULT_VERSION || 'v2026.10.1';
 const OUT_DIR = process.env.OUT_DIR || resolve(here, '../public');
 const MAX_FILE_MB = Number(process.env.VAULT_MAX_FILE_MB || 20);
 
 const log = (...a) => console.log('[web-vault]', ...a);
 const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
-const base =
-  process.env.WEB_VAULT_BASE_URL ||
-  `https://github.com/dani-garcia/bw_web_builds/releases/download/${VERSION}`;
+// 只有一个开关：WEB_VAULT_VERSION。
+//   不设      -> 什么都不做，用仓库里已入库的 public/
+//   设 vX.Y.Z -> 拉这个版本
+//   设一个 .tar.gz 路径 -> 用本地包（离线/内网）
+// 值里带路径分隔符或以 .tar.gz/.tgz 结尾就当本地包，否则当版本号。
+const ARG = String(process.env.WEB_VAULT_VERSION ?? '').trim();
+const looksLocal = /\.(tar\.gz|tgz)$/i.test(ARG) || ARG.includes('/') || ARG.includes('\\');
+const LOCAL_TARBALL = looksLocal ? ARG : '';
+const VERSION = looksLocal
+  ? (/bw_web_(v[0-9][^/\\]*)\.tar\.gz$/i.exec(ARG)?.[1] ?? 'local')
+  : ARG || 'v2026.10.1';
+
+const DOWNLOAD_BASE = 'https://github.com/dani-garcia/bw_web_builds/releases/download';
 const tarball = `bw_web_${VERSION}.tar.gz`;
 
 async function download(url, dest) {
@@ -86,21 +94,33 @@ function prune(dir) {
 }
 
 async function main() {
+  // 没有 WEB_VAULT_VERSION 就什么都不做：仓库里的 public/ 就是当前使用的版本。
+  // 「不设置 = 用仓库的」让这个脚本默认没有副作用，误跑一次不会覆盖已入库的产物。
+  if (!ARG) {
+    let vendored = '未知';
+    try {
+      vendored = JSON.parse(readFileSync(join(OUT_DIR, 'vw-version.json'), 'utf8')).version ?? vendored;
+    } catch {
+      /* 没有 vw-version.json 就只报"未知" */
+    }
+    log(`未设置 WEB_VAULT_VERSION，保留仓库里已入库的网页版（${vendored}）`);
+    log('要更新就设成目标版本号，或设成已下载好的 .tar.gz 路径');
+    return;
+  }
+
   const tmp = join(tmpdir(), `bw-web-${VERSION}-${Date.now()}`);
   const extractDir = join(tmp, 'extract');
   mkdirSync(extractDir, { recursive: true });
   const tgz = join(tmp, tarball);
 
-  // 支持从本地 tar 包安装：离线构建、或先在能连 GitHub 的机器上下好再拿过来。
-  // 校验逻辑完全一致（哈希还是照查），只是省掉下载这一步。
-  const localTarball = process.env.WEB_VAULT_TARBALL;
-  if (localTarball) {
-    if (!existsSync(localTarball)) throw new Error(`WEB_VAULT_TARBALL 指向的文件不存在：${localTarball}`);
-    copyFileSync(localTarball, tgz);
-    log(`使用本地包 ${localTarball}`);
+  // 本地包（WEB_VAULT_VERSION 指到 .tar.gz）走这条；否则下载。
+  if (LOCAL_TARBALL) {
+    if (!existsSync(LOCAL_TARBALL)) throw new Error(`WEB_VAULT_VERSION 指向的本地包不存在：${LOCAL_TARBALL}`);
+    copyFileSync(LOCAL_TARBALL, tgz);
+    log(`使用本地包 ${LOCAL_TARBALL}`);
   } else {
     log(`下载 ${VERSION} ...`);
-    await download(`${base}/${tarball}`, tgz);
+    await download(`${DOWNLOAD_BASE}/${VERSION}/${tarball}`, tgz);
   }
 
   // 校验 sha256：优先用仓库里钉死的哈希，其次用同源的 sha256sums.txt。
@@ -115,7 +135,7 @@ async function main() {
     log('sha256 校验通过（仓库钉住的哈希）');
   } else {
     try {
-      const sums = await (await fetch(`${base}/sha256sums.txt`)).text();
+      const sums = await (await fetch(`${DOWNLOAD_BASE}/${VERSION}/sha256sums.txt`)).text();
       const line = sums.split('\n').find((l) => l.includes(tarball));
       if (!line) throw new Error(`sha256sums.txt 里没有 ${tarball}`);
       const want = line.trim().split(/\s+/)[0];
@@ -202,14 +222,15 @@ async function main() {
 
 main().catch((e) => {
   log('============================================================');
-  log('网页版下载失败，本次部署将没有 /vault/ 网页版（后端功能不受影响）');
+  log('网页版更新失败，仓库里已入库的版本保持不动（后端完全不受影响）');
   log('原因:', e.message);
-  log('下载地址:', `${base}/${tarball}`);
+  log('下载地址:', `${DOWNLOAD_BASE}/${VERSION}/${tarball}`);
   log('');
   log('处理办法：');
-  log('  1) 确认构建机能访问上面这个地址（国内构建机访问 GitHub Releases 常超时）');
-  log('  2) 换下载源：设置 WEB_VAULT_BASE_URL 指向可达的镜像，然后重新部署');
-  log('注意：镜像属于第三方，网页版会拿到你的主密码，请只使用你信任的源。');
+  log('  1) 确认这台机器能访问上面这个地址');
+  log('  2) 访问不了就先在别处把 tar 包下好，再指过去：');
+  log(`     WEB_VAULT_VERSION=/path/to/bw_web_${VERSION}.tar.gz npm run webvault`);
+  log('注意：网页版会拿到你的主密码，请只使用你信任的来源。');
   log('============================================================');
   process.exit(0);
 });
