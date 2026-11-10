@@ -6,8 +6,8 @@ import app from '../src/index.js';
 const env = {
   BASE_URL: 'http://localhost:8787',
   ALLOWED_EMAILS: '*@example.com',
-  JWT_SECRET: 'test-access',
-  JWT_REFRESH_SECRET: 'test-refresh',
+  JWT_SECRET: 'test-access-secret-0123456789abcdef',
+  JWT_REFRESH_SECRET: 'test-refresh-secret-0123456789abcd',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
   MAIL_ENABLED: 'false',
@@ -716,6 +716,109 @@ check('password-hint 4 次后触发限流（3 次 200 + 1 次 429）', statuses.
 
 r = await call('GET', '/notifications/hub');
 check('/notifications/hub -> 426 降级', r.status === 426 && r.data?.error === 'websocket_not_supported', r);
+
+// 27. 安全回归：带密码的文件 Send 不能绕过密码 / 改密必须证明当前密码
+//     这一段用全新账号，避免受前面轮换/踢下线影响
+const secEmail = `sec-${Date.now()}@example.com`;
+const secMph = 'sec-master-hash';
+r = await call('POST', '/api/accounts/register', {
+  body: {
+    email: secEmail,
+    masterPasswordHash: secMph,
+    userSymmetricKey: '2.sec-key|iv|ct',
+    userAsymmetricKeys: { encryptedPrivateKey: '2.sec-priv|iv|ct', publicKey: 'sec-pub' },
+    kdf: 0,
+    kdfIterations: 100000,
+  },
+});
+check('安全回归：注册临时账号', r.status === 200, r);
+r = await call('POST', '/identity/connect/token', {
+  form: {
+    grant_type: 'password',
+    username: secEmail,
+    password: secMph,
+    scope: 'api offline_access',
+    client_id: 'web',
+    deviceType: '10',
+    deviceIdentifier: 'sec-dev',
+    deviceName: 'sec',
+  },
+});
+const secAccess = r.data?.access_token;
+check('安全回归：临时账号登录', r.status === 200 && !!secAccess, r);
+
+r = await call('POST', '/api/sends/file/v2', {
+  token: secAccess,
+  body: {
+    type: 1,
+    key: 'pw-file-key',
+    name: 'pw-file-send',
+    file: { fileName: 'secret.txt' },
+    fileLength: 6,
+    deletionDate: del,
+    password: 'letmein-please',
+  },
+});
+const secSend = r.data?.sendResponse ?? {};
+const secId = secSend.id;
+const secAccessId = secSend.accessId;
+await call('POST', `/api/sends/${secId}/file/${secId}`, { token: secAccess, raw: Buffer.from('hidden') });
+
+r = await call('POST', `/api/sends/access/file/${secAccessId}`, {});
+check('带密码的文件 Send：匿名请求下载地址 -> 401', r.status === 401, r);
+
+r = await call('POST', `/api/sends/access/file/${secAccessId}`, { body: { password: 'wrong-one' } });
+check('带密码的文件 Send：错误密码 -> 401', r.status === 401, r);
+
+r = await call('POST', `/api/sends/access/${secAccessId}`, { body: { password: 'letmein-please' } });
+const secToken = r.data?.token;
+check('正确密码换到 send-access 票据', r.status === 200 && !!secToken, r);
+
+r = await call('POST', `/api/sends/access/file/${secAccessId}`, { token: secToken });
+check('带票据可以拿下载地址', r.status === 200 && !!r.data?.url, r);
+if (r.data?.url) {
+  const u = new URL(r.data.url, 'http://localhost');
+  const bytes = await call('GET', u.pathname + u.search);
+  check('带票据可以下载到明文', bytes.rawText === 'hidden', bytes);
+}
+
+// 28. 安全回归：改主密码必须证明当前密码
+r = await call('POST', '/api/accounts/password', {
+  token: secAccess,
+  body: { masterPasswordHash: 'attacker-chosen', key: 'attacker-key' },
+});
+check('只凭 access token 改主密码 -> 被拒（400/401，不再被当成新密码）', r.status === 400 || r.status === 401, r);
+
+r = await call('POST', '/api/accounts/password', {
+  token: secAccess,
+  body: { masterPasswordHash: 'wrong-current', newMasterPasswordHash: 'x', key: 'k' },
+});
+check('当前密码错误 -> 401', r.status === 401, r);
+
+// 网页版结构：masterPasswordHash=当前 + authenticationData/unlockData=新
+r = await call('POST', '/api/accounts/password', {
+  token: secAccess,
+  body: {
+    masterPasswordHash: secMph,
+    masterPasswordHint: '新提示',
+    authenticationData: { masterPasswordAuthenticationHash: 'sec-mph-2', salt: secEmail, kdf: { kdfType: 0, iterations: 100000 } },
+    unlockData: { masterKeyWrappedUserKey: '2.sec-key2|iv|ct', salt: secEmail, kdf: { kdfType: 0, iterations: 100000 } },
+  },
+});
+check('用网页版结构（authenticationData）改密 -> 200', r.status === 200, r);
+r = await call('POST', '/identity/connect/token', {
+  form: {
+    grant_type: 'password',
+    username: secEmail,
+    password: 'sec-mph-2',
+    scope: 'api offline_access',
+    client_id: 'web',
+    deviceType: '10',
+    deviceIdentifier: 'sec-dev-2',
+    deviceName: 'sec',
+  },
+});
+check('新密码可以登录（旧密码结构没被误写成新密码）', r.status === 200 && !!r.data?.access_token, r);
 
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

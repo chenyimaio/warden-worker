@@ -30,9 +30,30 @@ import { sendPasswordHint, mailConfigured } from './mail.js';
 import { readUpload } from './upload.js';
 
 const app = new Hono();
-app.use('*', cors());
 
 const envGet = (c, name, dflt) => c.env?.[name] ?? process.env[name] ?? dflt;
+
+// CORS：只放行 BASE_URL 自己的源。认证走 Bearer、不依赖 Cookie，所以全开放不至于直接
+// 泄露数据，但也不该给任意站点一个"可以代你发请求"的口子（同时避免以后引入 Cookie
+// 会话时变成高危）。
+const corsOptions = {
+  origin: (origin, c) => {
+    if (!origin) return undefined; // 非浏览器请求（手机客户端、curl）
+    const base = String(envGet(c, 'BASE_URL', '')).replace(/\/+$/, '');
+    if (!base) return origin; // 没配 BASE_URL 时保持旧行为，不阻塞部署
+    const alt = base.replace(/^https:/i, 'http:');
+    return origin === base || origin === alt ? origin : undefined;
+  },
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowHeaders: ['authorization', 'content-type', 'device-type', 'x-device-type', 'x-requested-with'],
+  maxAge: 600,
+};
+
+app.use('*', cors(corsOptions));
+
+// 批量接口的条目上限：防止一个请求塞几万条 id，把函数拖到超时、产生大量存储写入
+const BULK_MAX_IDS = 2000;
+const IMPORT_MAX_ITEMS = 5000;
 
 // ---------------------------------------------------------------- helpers
 async function body(c) {
@@ -155,6 +176,11 @@ const hintFieldsFrom = (plaintext) => {
   return { masterPasswordHint: text || null, masterPasswordHintEnc: null };
 };
 
+// 服务端二次哈希的迭代数：环境变量可能被写成 0 或极小值（pbkdf2Sync 会直接抛错，
+// 而极小的值等于把存储层哈希废掉），这里统一兜一个下限。
+const PBKDF2_MIN_ITERATIONS = 60000;
+const pbkdf2Iterations = (c) =>
+  Math.max(PBKDF2_MIN_ITERATIONS, Number(envGet(c, 'PASSWORD_ITERATIONS', 600000)) || 0);
 async function requireAuth(c) {
   const m = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
   if (!m) {
@@ -395,7 +421,7 @@ async function register(c) {
   const id = newId();
   const now = nowIso();
   const salt = randomB64();
-  const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
+  const iterations = pbkdf2Iterations(c);
 
   // 新版客户端（网页版 2026.x / 移动端）不再发扁平字段，而是把注册信息放在
   // masterPasswordAuthenticationData / masterPasswordUnlockData / accountKeys 里。
@@ -865,7 +891,7 @@ async function bulkMutate(c, fn) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore(c.env);
   const now = nowIso();
   for (const id of ids) {
@@ -885,7 +911,7 @@ app.post('/api/ciphers/delete', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -895,7 +921,7 @@ app.delete('/api/ciphers', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -918,7 +944,7 @@ async function moveCiphers(c) {
     const folder = await store.get(keys.folder(a.claims.sub, folderId));
     if (!folder) return c.json({ error: 'Invalid folder: Folder does not exist or belongs to another user' }, 400);
   }
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const now = nowIso();
   for (const id of ids) {
     await mutate(store, keys.cipher(a.claims.sub, id), (cur) => (cur ? { ...cur, folderId, updatedAt: now } : undefined));
@@ -1306,35 +1332,30 @@ app.post('/api/accounts/password', async (c) => {
 
   // 客户端有三代写法：
   //   1. 老客户端：masterPasswordHash=当前 + newMasterPasswordHash=新
-  //   2. 新版 SDK：新密码在 masterPasswordAuthenticationData / masterPasswordUnlockData
-  //   3. 网页版 2026.x（class Gh）：只发一个 masterPasswordHash，它其实是【新】密码，
-  //      当前密码由会话令牌保证（客户端另调 /accounts/verify-password 校验）。
-  // 只认前两种会让第 3 种永远返回 "Missing newMasterPasswordHash"。
-  const authData = p.masterPasswordAuthenticationData ?? {};
-  const unlockData = p.masterPasswordUnlockData ?? {};
-  const explicitNew = String(
+  //   2. 网页版 2026.x（class Ie）：masterPasswordHash=当前 +
+  //      authenticationData.masterPasswordAuthenticationHash=新 + unlockData
+  //   3. 新版 SDK：masterPasswordAuthenticationData / masterPasswordUnlockData
+  // 三种都要认，但**都必须带当前密码**。早期版本在没有新哈希时把 masterPasswordHash
+  // 当成新密码，等于只凭 access token 就能改主密码（token 泄露=账号被永久接管），
+  // 而且会把网页版真正发来的 authenticationData 误当成"没给新密码"。
+  const authData = p.authenticationData ?? p.masterPasswordAuthenticationData ?? {};
+  const unlockData = p.unlockData ?? p.masterPasswordUnlockData ?? {};
+  const newMph = String(
     p.newMasterPasswordHash ??
       p.newMasterPasswordHashB64 ??
       authData.masterPasswordAuthenticationHash ??
       unlockData.masterKeyAuthenticationHash ??
       '',
   );
-  const singleHash = String(p.masterPasswordHash ?? '');
-
-  let newMph = explicitNew;
-  if (explicitNew) {
-    // 有独立的新密码字段时，仍要求当前密码正确
-    const check = await checkPassword(c, a.user, p);
-    if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  } else if (singleHash) {
-    newMph = singleHash;
-  } else {
+  const check = await checkPassword(c, a.user, p);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
+  if (!newMph) {
     return c.json({ error: 'Missing newMasterPasswordHash', message: 'Missing newMasterPasswordHash', statusCode: 400 }, 400);
   }
 
   const store = getStore(c.env);
   const salt = randomB64();
-  const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
+  const iterations = pbkdf2Iterations(c);
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
   const newKey =
@@ -1390,8 +1411,11 @@ app.post('/api/accounts/password', async (c) => {
 app.post('/api/accounts/verify-password', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
+  // 这是个"密码对不对"的判定接口，必须限流，否则拿到 token 就是一个高速试密码入口
+  const rl = await limit(c, 'verify-password', a.claims.sub, 10, 60);
+  if (rl) return rl;
   const p = await body(c);
-  const authData = p.masterPasswordAuthenticationData ?? {};
+  const authData = p.authenticationData ?? p.masterPasswordAuthenticationData ?? {};
   const mph = String(p.masterPasswordHash ?? authData.masterPasswordAuthenticationHash ?? '');
   if (!mph) {
     return c.json({ error: 'Missing master password hash', message: 'Missing master password hash', statusCode: 400 }, 400);
@@ -1424,7 +1448,7 @@ app.post('/api/accounts/kdf', async (c) => {
 
   const store = getStore(c.env);
   const salt = randomB64();
-  const newIterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
+  const newIterations = pbkdf2Iterations(c);
   const newMph = String(authData.masterPasswordAuthenticationHash ?? '');
   if (!newMph) return c.json({ error: 'Missing masterPasswordAuthenticationHash' }, 400);
   const stamp = newId();
@@ -1830,8 +1854,16 @@ function sendToJson(s) {
   };
 }
 
-function sendAccessJson(s) {
+async function sendAccessJson(env, s) {
   const isText = Number(s.type) === SEND_TEXT;
+  // token：通过密码校验后签发的短期票据。网页版下载文件 Send 时把它放进 Authorization
+  // 头（sendApiService.getSendFileDownloadData 读的正是 access.token）。没有它就只能
+  // 走"按 accessId 反查"的老路，那条路等于绕开密码。
+  const token = await signAccess(
+    env,
+    { sub: 'send-access', sid: accessIdFromUuid(s.id), scope: ['api.send.access'] },
+    '10m',
+  );
   return {
     id: s.id,
     type: Number(s.type),
@@ -1840,6 +1872,7 @@ function sendAccessJson(s) {
     file: isText ? null : s.data,
     expirationDate: s.expirationDate ?? null,
     creatorIdentifier: null,
+    token,
     object: 'send-access',
   };
 }
@@ -2009,7 +2042,7 @@ app.post('/api/sends/access/:accessId', async (c) => {
   } catch (e) {
     console.warn('[send-access] accessCount update failed (ignored)', e?.message || e);
   }
-  return c.json(sendAccessJson(send));
+  return c.json(await sendAccessJson(c.env, send));
 });
 
 app.post('/api/sends/access', async (c) => {
@@ -2049,13 +2082,16 @@ app.post('/api/sends/access', async (c) => {
     }));
     return c.json({ error: v.error }, v.status);
   }
-  return c.json(sendAccessJson(send));
+  return c.json(await sendAccessJson(c.env, send));
 });
 
 // file Send: metadata -> binary -> anonymous download
 // NOTE: /api/sends/access/file/:fileId must be registered before
 // /api/sends/:id/file/:fileId, otherwise "access" is taken as a sendId.
 app.post('/api/sends/access/file/:fileId', async (c) => {
+  const rl = await limit(c, 'send-access-file', requestIp(c), 60, 60);
+  if (rl) return rl;
+
   const store = getStore(c.env);
   const p = await body(c);
   const auth = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
@@ -2065,12 +2101,16 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   // 新数据里 file.id 就是 Send 的 id，能直接反查；老数据写死成 'file'，所以
   // 优先用 token 里的 sid 定位，再退回按 fileId 反查。
   let send = null;
+  let tokenBound = false;
   if (token) {
     try {
       const payload = await verifyAccess(c.env, token);
       if (payload?.sid != null) {
         const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
-        if (idx) send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
+        if (idx) {
+          send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
+          tokenBound = Boolean(send);
+        }
       }
     } catch (e) {
       console.warn('[send-access] file token rejected', e?.code || e?.message || e);
@@ -2080,6 +2120,18 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+
+  // 带密码的 Send 必须先通过 /sends/access/<accessId> 换到票据才能下载。
+  // 早期版本允许不带票据直接按 accessId 反查，等于把密码保护整个绕过去。
+  // 兼容：客户端把密码直接内联在这个请求里也认（网页版个别路径会这么发）。
+  if (sendHasPassword(send) && !tokenBound) {
+    const inline = p.password ?? p.passwordHash ?? null;
+    if (!checkSendPassword(send, inline)) {
+      const msg = inline ? 'Invalid password' : 'Password required';
+      return c.json({ error: msg, message: msg, statusCode: 401 }, 401);
+    }
+  }
+
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: 'file not found' }, 404);
 
@@ -2089,11 +2141,16 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   //   const n = await fetch(new Request(t.url, { cache: "no-store" }));
   // 所以这里必须返回带 url 的 JSON，而不是字节流。url 里带一个短期令牌，
   // 因为网页版那次 fetch 不会再带 Authorization。
-  const downloadToken = await signAccess(c.env, {
-    sub: 'send-access',
-    sid: accessIdFromUuid(send.id),
-    scope: ['api.send.access'],
-  });
+  // TTL 从 1h 收到 10min：URL 会进日志/历史/Referer，暴露面越小越好。
+  const downloadToken = await signAccess(
+    c.env,
+    {
+      sub: 'send-access',
+      sid: accessIdFromUuid(send.id),
+      scope: ['api.send.access'],
+    },
+    '10m',
+  );
   const fileId = c.req.param('fileId');
   return c.json({
     id: fileId,
@@ -2123,6 +2180,17 @@ app.get('/api/sends/access/file/:fileId/data', async (c) => {
   if (!send) return c.json({ error: 'Send is not accessible' }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+
+  // 计数放在真正吐字节这一步：文件 Send 的下载上限才真正生效
+  // （此前只在 /sends/access/<accessId> 里加，绕过那条路径就完全不计）
+  try {
+    await mutate(store, keys.send(send.userId, send.id), (cur) =>
+      cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
+    );
+  } catch (e) {
+    console.warn('[send-access] accessCount update failed (ignored)', e?.message || e);
+  }
+
   const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
   return res ?? c.json({ error: 'file not found' }, 404);
 });
@@ -2455,7 +2523,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
 
 // new salt + hash + keys + security stamp, then revoke all devices
 const salt = randomB64();
-  const iterations = Number(envGet(c, 'PASSWORD_ITERATIONS', 600000));
+  const iterations = pbkdf2Iterations(c);
   const newMph = rotationMph;
   const stamp = newId();
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
@@ -2486,7 +2554,7 @@ async function importCiphers(c) {
 
   // Bitwarden olders[] + ciphers[] + folderRelationships[{key: cipherIndex, value: folderIndex}]
   const folderIds = [];
-  for (const f of Array.isArray(p.folders) ? p.folders : []) {
+  for (const f of (Array.isArray(p.folders) ? p.folders : []).slice(0, IMPORT_MAX_ITEMS)) {
     const id = newId();
     await store.put(keys.folder(a.claims.sub, id), {
       id,
@@ -2506,7 +2574,7 @@ async function importCiphers(c) {
   );
 
   let count = 0;
-  for (const [index, src] of (Array.isArray(p.ciphers) ? p.ciphers : []).entries()) {
+  for (const [index, src] of (Array.isArray(p.ciphers) ? p.ciphers : []).slice(0, IMPORT_MAX_ITEMS).entries()) {
     const folderIndex = rels.get(index);
     const id = newId();
     await store.put(keys.cipher(a.claims.sub, id), {
@@ -2529,11 +2597,25 @@ async function importCiphers(c) {
 }
 
 // ---------------------------------------------------------------- auth requests (login with device)
-const requestIp = (c) =>
-  c.req.header('cf-connecting-ip') ||
-  c.req.header('x-real-ip') ||
-  (c.req.header('x-forwarded-for') || '').split(',')[0].trim() ||
-  '127.0.0.1';
+// 客户端 IP：只信平台/代理注入的头。
+// 注意 X-Forwarded-For 的**第一个**元素是客户端自己写的，早期版本直接取它，
+// 等于把按 IP 的限流和设备 IP 绑定全部作废（换一个头就是一票新配额）。
+// 这里的优先级：平台专有头 > x-real-ip > XFF 的**最后一跳**（最近代理追加的那一段）。
+// 部署后建议核对平台文档/日志，确认哪个头是真实的；若都不存在会退化成 'unknown'，
+// 那时所有请求共用同一个限流桶（宁可严一点，也不要可伪造）。
+const PLATFORM_IP_HEADERS = ['eo-connecting-ip', 'cf-connecting-ip', 'true-client-ip'];
+
+const requestIp = (c) => {
+  for (const h of PLATFORM_IP_HEADERS) {
+    const v = (c.req.header(h) || '').trim();
+    if (v) return v;
+  }
+  const real = (c.req.header('x-real-ip') || '').trim();
+  if (real) return real;
+  const xff = (c.req.header('x-forwarded-for') || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (xff.length) return xff[xff.length - 1];
+  return 'unknown';
+};
 
 const requestDeviceType = (c) =>
   Number(c.req.header('device-type') ?? c.req.header('x-device-type') ?? 14) || 14;
@@ -2925,7 +3007,7 @@ app.all('*', (c) => {
 // 最终报 "501 Not Implemented against /vault/identity/connect/token"。
 // 把同一套路由再挂一份到 /vault 下即可；拿到 config 后客户端会改用其中的绝对地址。
 const exported = new Hono();
-exported.use('*', cors());
+exported.use('*', cors(corsOptions));
 // 网页版直接构建在站点根（public/index.html）。这里不再给 / 和 /index.html 注册
 // 任何特殊处理：构建成功时静态层会先命中，构建失败（或 WEB_VAULT_ENABLED=false）
 // 就让请求落到下面的兜底 404，交给 CDN/平台自己的处理，函数不插手。

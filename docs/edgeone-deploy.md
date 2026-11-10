@@ -5,12 +5,10 @@
 ---
 
 ## 一、这个项目是什么
-
-`warden-worker` 是一个 **Bitwarden 兼容服务端**（协议与 Vaultwarden 对齐），原本跑在 Cloudflare Workers 上。`edgeone/` 目录是它的 **腾讯云 EdgeOne Makers** 移植版：
-
-- 运行在 **Cloud Functions（Node.js 20.19）** 上，入口是单一函数 `cloud-functions/[[default]].js`
-- 数据存放在 **EdgeOne Blob 存储**（`@edgeone/pages-blob`），而不是 D1/KV
-- 自带一份 **官方 Web Vault 静态文件**，构建期下载，站点根直接可用
+```bash
+https://github.com/chenyimaio/warden-worker
+```
+`warden-worker` 是一个 **Bitwarden 兼容服务端**（协议与 Vaultwarden 对齐）
 
 能做的事：
 
@@ -20,7 +18,7 @@
 | 条目、文件夹、收藏、软删除与恢复 | ✅ |
 | 文本 Send / 文件 Send | ✅（文件 ≤ 6 MB） |
 | 附件上传下载 | ✅（≤ 6 MB） |
-| TOTP 两步验证 + 恢复码 | ✅ |
+| TOTP  | ✅ |
 | 主密码提示邮件 | ✅（可选 SMTP） |
 | 网页版 Web Vault | ✅ |
 | WebSocket 实时推送 | ❌（返回 426，客户端自动降级为轮询） |
@@ -47,8 +45,7 @@
 
 1. **一个 EdgeOne 账号**，并开通 Makers（Pages）能力
 2. **一个域名**（Makers 会分配测试域名，但密码库建议绑自己的）
-3. **仓库访问权限**：Fork 或直接用 `https://github.com/chenyimaio/warden-worker.git`
-4. 心里有数的一件事：**这是密码库**。服务端只保存 `PBKDF2(主密码)` 的哈希和加密后的数据，拿不到明文，但域名、备份、密钥仍然要自己看住。
+3. **仓库访问权限**：Fork 该仓库
 
 ---
 
@@ -90,7 +87,7 @@
 | 变量 | 说明 | 示例 |
 |---|---|---|
 | `BASE_URL` | 对外访问地址，影响邮件链接和客户端配置 | `https://vault.example.com` |
-| `ALLOWED_EMAILS` | 允许注册的邮箱，glob 写法，逗号分隔；**留空 = 禁止任何人注册** | `me@example.com` 或 `*@example.com` |
+| `ALLOWED_EMAILS` | 允许注册的邮箱，glob 写法，逗号分隔；**留空 = 禁止任何人注册** | `me@example.com` 或 `*@example.com` `*@example.com,me@example.com` |
 | `JWT_SECRET` | 令牌签名密钥，**至少 32 位随机串** | 见下方生成命令 |
 
 生成密钥：
@@ -99,11 +96,6 @@
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-> **`JWT_REFRESH_SECRET` 可以不填**。留空时服务端用
-> `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生一个独立的刷新令牌密钥，
-> 两种令牌不能互相冒用。只有需要单独轮换刷新令牌密钥时才显式配置它。
-
-> 一键部署链接只预填上面 3 个。`STORE_DRIVER` 留空即 `blob`，`BLOB_STORE` 留空即 `warden`，都不必填。
 
 ### 4.2 存储
 
@@ -120,12 +112,16 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 | `PASSWORD_ITERATIONS` | `600000` | 服务端二次哈希迭代数（**不是**用户 KDF），只影响新写入的记录 |
 | `UPLOAD_MAX_BYTES` | `6291456` | 单次上传上限，默认 6 MiB |
 | `ALLOW_TOTP_DRIFT` | `true` | 允许 TOTP ±1 个时间步 |
+> `JWT_REFRESH_SECRET` 留空时服务端用
+> `HMAC-SHA256(JWT_SECRET, "warden/v1/refresh-token-signing-key")` 派生一个独立的刷新令牌密钥，
+
+> 两种令牌不能互相冒用。只有需要单独轮换刷新令牌密钥时才显式配置它。
 
 ### 4.4 网页版（构建期生效）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WEB_VAULT_ENABLED` | `true` | `false` 则构建时跳过下载，产物体积从 ~80 MB 降到接近 0 |
+| `WEB_VAULT_ENABLED` | `true` | `false` 则构建时跳过下载，产物体积从 ~80 MB 降到接近 0 为false时send等需要webui的功能不可使用 |
 | `WEB_VAULT_VERSION` | `v2026.10.1` | 固定的 Web Vault 版本 |
 | `WEB_VAULT_BASE_URL` | GitHub Releases | 换镜像源用（国内构建机拉不动 GitHub 时） |
 

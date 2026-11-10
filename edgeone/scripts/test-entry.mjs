@@ -9,8 +9,8 @@ import { onRequestPost as preloginPost } from '../cloud-functions/api/accounts/p
 const env = {
   BASE_URL: 'http://localhost',
   ALLOWED_EMAILS: '*@example.com',
-  JWT_SECRET: 'entry-a',
-  JWT_REFRESH_SECRET: 'entry-r',
+  JWT_SECRET: 'entry-access-secret-0123456789abcdef',
+  JWT_REFRESH_SECRET: 'entry-refresh-secret-0123456789abcd',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
   MAIL_ENABLED: 'false',

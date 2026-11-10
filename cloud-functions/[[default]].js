@@ -14550,6 +14550,7 @@ function verifyPassword(storedHash, salt, iterations, candidate) {
   return a.length === b.length && timingSafeEqual2(a, b);
 }
 var REFRESH_SECRET_LABEL = "warden/v1/refresh-token-signing-key";
+var MIN_SECRET_LEN = 32;
 function secret(env, name) {
   let v = env?.[name] ?? process.env[name];
   if (!v && name === "JWT_REFRESH_SECRET") {
@@ -14557,20 +14558,24 @@ function secret(env, name) {
     if (base) v = createHmac2("sha256", base).update(REFRESH_SECRET_LABEL).digest("base64url");
   }
   if (!v) throw new Error(`missing secret: ${name}`);
+  if (String(v).length < MIN_SECRET_LEN) {
+    throw new Error(`secret too short: ${name} needs at least ${MIN_SECRET_LEN} characters`);
+  }
   return new TextEncoder().encode(v);
 }
-async function signAccess(env, claims) {
-  return await new SignJWT(claims).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("1h").sign(secret(env, "JWT_SECRET"));
+var JWT_ALGS = ["HS256"];
+async function signAccess(env, claims, ttl = "1h") {
+  return await new SignJWT(claims).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime(ttl).sign(secret(env, "JWT_SECRET"));
 }
 async function signRefresh(env, payload) {
   return await new SignJWT(payload).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("30d").sign(secret(env, "JWT_REFRESH_SECRET"));
 }
 async function verifyAccess(env, token) {
-  const { payload } = await jwtVerify(token, secret(env, "JWT_SECRET"));
+  const { payload } = await jwtVerify(token, secret(env, "JWT_SECRET"), { algorithms: JWT_ALGS });
   return payload;
 }
 async function verifyRefresh(env, token) {
-  const { payload } = await jwtVerify(token, secret(env, "JWT_REFRESH_SECRET"));
+  const { payload } = await jwtVerify(token, secret(env, "JWT_REFRESH_SECRET"), { algorithms: JWT_ALGS });
   return payload;
 }
 var REMEMBER_ISS = "warden-edgeone-remember";
@@ -14578,7 +14583,7 @@ async function signRemember(env, { sub, uid }) {
   return await new SignJWT({ sub, uid, iss: REMEMBER_ISS }).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("30d").sign(secret(env, "JWT_REFRESH_SECRET"));
 }
 async function verifyRemember(env, token) {
-  const res = await jwtVerify(token, secret(env, "JWT_REFRESH_SECRET"));
+  const res = await jwtVerify(token, secret(env, "JWT_REFRESH_SECRET"), { algorithms: JWT_ALGS });
   if (res.payload.iss !== REMEMBER_ISS) throw new Error("bad remember issuer");
   return res;
 }
@@ -15031,8 +15036,22 @@ async function readUpload(c) {
 
 // src/index.js
 var app = new Hono3();
-app.use("*", cors());
 var envGet = (c, name, dflt) => c.env?.[name] ?? process.env[name] ?? dflt;
+var corsOptions = {
+  origin: (origin, c) => {
+    if (!origin) return void 0;
+    const base = String(envGet(c, "BASE_URL", "")).replace(/\/+$/, "");
+    if (!base) return origin;
+    const alt = base.replace(/^https:/i, "http:");
+    return origin === base || origin === alt ? origin : void 0;
+  },
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowHeaders: ["authorization", "content-type", "device-type", "x-device-type", "x-requested-with"],
+  maxAge: 600
+};
+app.use("*", cors(corsOptions));
+var BULK_MAX_IDS = 2e3;
+var IMPORT_MAX_ITEMS = 5e3;
 async function body(c) {
   const ct = c.req.header("content-type") || "";
   if (ct.includes("application/json")) return await c.req.json().catch(() => ({})) ?? {};
@@ -15125,6 +15144,8 @@ var hintFieldsFrom = (plaintext) => {
   const text = plaintext == null ? "" : String(plaintext).trim();
   return { masterPasswordHint: text || null, masterPasswordHintEnc: null };
 };
+var PBKDF2_MIN_ITERATIONS = 6e4;
+var pbkdf2Iterations = (c) => Math.max(PBKDF2_MIN_ITERATIONS, Number(envGet(c, "PASSWORD_ITERATIONS", 6e5)) || 0);
 async function requireAuth(c) {
   const m = (c.req.header("authorization") || "").match(/^Bearer\s+(.+)$/i);
   if (!m) {
@@ -15343,7 +15364,7 @@ async function register(c) {
   const id = newId();
   const now = nowIso();
   const salt = randomB64();
-  const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
+  const iterations = pbkdf2Iterations(c);
   const regAuth = p.masterPasswordAuthenticationData ?? {};
   const regUnlock = p.masterPasswordUnlockData ?? {};
   const regKdf = regUnlock.kdf ?? regAuth.kdf ?? null;
@@ -15745,7 +15766,7 @@ async function bulkMutate(c, fn) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore2(c.env);
   const now = nowIso();
   for (const id of ids) {
@@ -15763,7 +15784,7 @@ app.post("/api/ciphers/delete", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore2(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -15773,7 +15794,7 @@ app.delete("/api/ciphers", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const store = getStore2(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -15793,7 +15814,7 @@ async function moveCiphers(c) {
     const folder = await store.get(keys.folder(a.claims.sub, folderId));
     if (!folder) return c.json({ error: "Invalid folder: Folder does not exist or belongs to another user" }, 400);
   }
-  const ids = Array.isArray(p.ids) ? p.ids.map(String) : [];
+  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
   const now = nowIso();
   for (const id of ids) {
     await mutate(store, keys.cipher(a.claims.sub, id), (cur) => cur ? { ...cur, folderId, updatedAt: now } : void 0);
@@ -16135,24 +16156,19 @@ app.post("/api/accounts/password", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const authData = p.masterPasswordAuthenticationData ?? {};
-  const unlockData = p.masterPasswordUnlockData ?? {};
-  const explicitNew = String(
+  const authData = p.authenticationData ?? p.masterPasswordAuthenticationData ?? {};
+  const unlockData = p.unlockData ?? p.masterPasswordUnlockData ?? {};
+  const newMph = String(
     p.newMasterPasswordHash ?? p.newMasterPasswordHashB64 ?? authData.masterPasswordAuthenticationHash ?? unlockData.masterKeyAuthenticationHash ?? ""
   );
-  const singleHash = String(p.masterPasswordHash ?? "");
-  let newMph = explicitNew;
-  if (explicitNew) {
-    const check = await checkPassword(c, a.user, p);
-    if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  } else if (singleHash) {
-    newMph = singleHash;
-  } else {
+  const check = await checkPassword(c, a.user, p);
+  if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
+  if (!newMph) {
     return c.json({ error: "Missing newMasterPasswordHash", message: "Missing newMasterPasswordHash", statusCode: 400 }, 400);
   }
   const store = getStore2(c.env);
   const salt = randomB64();
-  const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
+  const iterations = pbkdf2Iterations(c);
   const stamp = newId();
   const hintFields = hasHintField(p) ? hintFieldsFrom(readHint(p)) : null;
   const newKey = p.key ?? unlockData.masterKeyWrappedUserKey ?? unlockData.masterKeyEncryptedUserKey ?? unlockData.key ?? null;
@@ -16189,8 +16205,10 @@ app.post("/api/accounts/password", async (c) => {
 app.post("/api/accounts/verify-password", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
+  const rl = await limit(c, "verify-password", a.claims.sub, 10, 60);
+  if (rl) return rl;
   const p = await body(c);
-  const authData = p.masterPasswordAuthenticationData ?? {};
+  const authData = p.authenticationData ?? p.masterPasswordAuthenticationData ?? {};
   const mph = String(p.masterPasswordHash ?? authData.masterPasswordAuthenticationHash ?? "");
   if (!mph) {
     return c.json({ error: "Missing master password hash", message: "Missing master password hash", statusCode: 400 }, 400);
@@ -16220,7 +16238,7 @@ app.post("/api/accounts/kdf", async (c) => {
   }
   const store = getStore2(c.env);
   const salt = randomB64();
-  const newIterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
+  const newIterations = pbkdf2Iterations(c);
   const newMph = String(authData.masterPasswordAuthenticationHash ?? "");
   if (!newMph) return c.json({ error: "Missing masterPasswordAuthenticationHash" }, 400);
   const stamp = newId();
@@ -16564,8 +16582,13 @@ function sendToJson(s) {
     object: "send"
   };
 }
-function sendAccessJson(s) {
+async function sendAccessJson(env, s) {
   const isText = Number(s.type) === SEND_TEXT;
+  const token = await signAccess(
+    env,
+    { sub: "send-access", sid: accessIdFromUuid(s.id), scope: ["api.send.access"] },
+    "10m"
+  );
   return {
     id: s.id,
     type: Number(s.type),
@@ -16574,6 +16597,7 @@ function sendAccessJson(s) {
     file: isText ? null : s.data,
     expirationDate: s.expirationDate ?? null,
     creatorIdentifier: null,
+    token,
     object: "send-access"
   };
 }
@@ -16727,7 +16751,7 @@ app.post("/api/sends/access/:accessId", async (c) => {
   } catch (e) {
     console.warn("[send-access] accessCount update failed (ignored)", e?.message || e);
   }
-  return c.json(sendAccessJson(send));
+  return c.json(await sendAccessJson(c.env, send));
 });
 app.post("/api/sends/access", async (c) => {
   const p = await body(c);
@@ -16765,20 +16789,26 @@ app.post("/api/sends/access", async (c) => {
     }));
     return c.json({ error: v.error }, v.status);
   }
-  return c.json(sendAccessJson(send));
+  return c.json(await sendAccessJson(c.env, send));
 });
 app.post("/api/sends/access/file/:fileId", async (c) => {
+  const rl = await limit(c, "send-access-file", requestIp(c), 60, 60);
+  if (rl) return rl;
   const store = getStore2(c.env);
   const p = await body(c);
   const auth = (c.req.header("authorization") || "").match(/^Bearer\s+(.+)$/i);
   const token = p.token ?? (auth ? auth[1] : "");
   let send = null;
+  let tokenBound = false;
   if (token) {
     try {
       const payload = await verifyAccess(c.env, token);
       if (payload?.sid != null) {
         const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
-        if (idx) send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
+        if (idx) {
+          send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
+          tokenBound = Boolean(send);
+        }
       }
     } catch (e) {
       console.warn("[send-access] file token rejected", e?.code || e?.message || e);
@@ -16788,13 +16818,24 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+  if (sendHasPassword(send) && !tokenBound) {
+    const inline = p.password ?? p.passwordHash ?? null;
+    if (!checkSendPassword(send, inline)) {
+      const msg = inline ? "Invalid password" : "Password required";
+      return c.json({ error: msg, message: msg, statusCode: 401 }, 401);
+    }
+  }
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
   if (!bytes) return c.json({ error: "file not found" }, 404);
-  const downloadToken = await signAccess(c.env, {
-    sub: "send-access",
-    sid: accessIdFromUuid(send.id),
-    scope: ["api.send.access"]
-  });
+  const downloadToken = await signAccess(
+    c.env,
+    {
+      sub: "send-access",
+      sid: accessIdFromUuid(send.id),
+      scope: ["api.send.access"]
+    },
+    "10m"
+  );
   const fileId = c.req.param("fileId");
   return c.json({
     id: fileId,
@@ -16821,6 +16862,15 @@ app.get("/api/sends/access/file/:fileId/data", async (c) => {
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
+  try {
+    await mutate(
+      store,
+      keys.send(send.userId, send.id),
+      (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
+    );
+  } catch (e) {
+    console.warn("[send-access] accessCount update failed (ignored)", e?.message || e);
+  }
   const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
   return res ?? c.json({ error: "file not found" }, 404);
 });
@@ -17090,7 +17140,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
     );
   }
   const salt = randomB64();
-  const iterations = Number(envGet(c, "PASSWORD_ITERATIONS", 6e5));
+  const iterations = pbkdf2Iterations(c);
   const newMph = rotationMph;
   const stamp = newId();
   await mutate(
@@ -17118,7 +17168,7 @@ async function importCiphers(c) {
   const store = getStore2(c.env);
   const now = nowIso();
   const folderIds = [];
-  for (const f of Array.isArray(p.folders) ? p.folders : []) {
+  for (const f of (Array.isArray(p.folders) ? p.folders : []).slice(0, IMPORT_MAX_ITEMS)) {
     const id = newId();
     await store.put(keys.folder(a.claims.sub, id), {
       id,
@@ -17136,7 +17186,7 @@ async function importCiphers(c) {
     ])
   );
   let count = 0;
-  for (const [index, src] of (Array.isArray(p.ciphers) ? p.ciphers : []).entries()) {
+  for (const [index, src] of (Array.isArray(p.ciphers) ? p.ciphers : []).slice(0, IMPORT_MAX_ITEMS).entries()) {
     const folderIndex = rels.get(index);
     const id = newId();
     await store.put(keys.cipher(a.claims.sub, id), {
@@ -17156,7 +17206,18 @@ async function importCiphers(c) {
   await touchUser(store, a.claims.sub);
   return c.json({ count, folders: folderIds.length }, 200);
 }
-var requestIp = (c) => c.req.header("cf-connecting-ip") || c.req.header("x-real-ip") || (c.req.header("x-forwarded-for") || "").split(",")[0].trim() || "127.0.0.1";
+var PLATFORM_IP_HEADERS = ["eo-connecting-ip", "cf-connecting-ip", "true-client-ip"];
+var requestIp = (c) => {
+  for (const h of PLATFORM_IP_HEADERS) {
+    const v = (c.req.header(h) || "").trim();
+    if (v) return v;
+  }
+  const real = (c.req.header("x-real-ip") || "").trim();
+  if (real) return real;
+  const xff = (c.req.header("x-forwarded-for") || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (xff.length) return xff[xff.length - 1];
+  return "unknown";
+};
 var requestDeviceType = (c) => Number(c.req.header("device-type") ?? c.req.header("x-device-type") ?? 14) || 14;
 function authRequestToJson(ar, origin) {
   return {
@@ -17497,7 +17558,7 @@ app.all("*", (c) => {
   return c.json({ error: "not_found", path }, 404, { "cache-control": "no-store" });
 });
 var exported = new Hono3();
-exported.use("*", cors());
+exported.use("*", cors(corsOptions));
 exported.get("/vault", (c) => c.redirect("/", 302));
 exported.get("/icons/*", (c) => {
   c.header("cache-control", "public, max-age=86400");

@@ -33,6 +33,7 @@ export function verifyPassword(storedHash, salt, iterations, candidate) {
 // 两个用途拿到的是互不相同的密钥，安全性不低于手工填第二个随机串。
 // 显式配置 JWT_REFRESH_SECRET 时以它为准（便于轮换，或从旧部署平滑迁移）。
 const REFRESH_SECRET_LABEL = 'warden/v1/refresh-token-signing-key';
+const MIN_SECRET_LEN = 32;
 
 function secret(env, name) {
   let v = env?.[name] ?? process.env[name];
@@ -41,15 +42,21 @@ function secret(env, name) {
     if (base) v = createHmac('sha256', base).update(REFRESH_SECRET_LABEL).digest('base64url');
   }
   if (!v) throw new Error(`missing secret: ${name}`);
+  // 只判空不够：JWT_SECRET=a 也能部署上线，随后全部令牌可被暴力伪造。
+  if (String(v).length < MIN_SECRET_LEN) {
+    throw new Error(`secret too short: ${name} needs at least ${MIN_SECRET_LEN} characters`);
+  }
   return new TextEncoder().encode(v);
 }
 
-/** 对齐 Rust TokenResponse 需要的 claims 子集 */
-export async function signAccess(env, claims) {
+const JWT_ALGS = ['HS256'];
+
+/** 对齐 Rust TokenResponse 需要的 claims 子集；ttl 可缩短（下载/上传这类短期票据） */
+export async function signAccess(env, claims, ttl = '1h') {
   return await new SignJWT(claims)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setExpirationTime('1h')
+    .setExpirationTime(ttl)
     .sign(secret(env, 'JWT_SECRET'));
 }
 
@@ -62,12 +69,12 @@ export async function signRefresh(env, payload) {
 }
 
 export async function verifyAccess(env, token) {
-  const { payload } = await jwtVerify(token, secret(env, 'JWT_SECRET'));
+  const { payload } = await jwtVerify(token, secret(env, 'JWT_SECRET'), { algorithms: JWT_ALGS });
   return payload;
 }
 
 export async function verifyRefresh(env, token) {
-  const { payload } = await jwtVerify(token, secret(env, 'JWT_REFRESH_SECRET'));
+  const { payload } = await jwtVerify(token, secret(env, 'JWT_REFRESH_SECRET'), { algorithms: JWT_ALGS });
   return payload;
 }
 
@@ -83,7 +90,7 @@ export async function signRemember(env, { sub, uid }) {
 }
 
 export async function verifyRemember(env, token) {
-  const res = await jwtVerify(token, secret(env, 'JWT_REFRESH_SECRET'));
+  const res = await jwtVerify(token, secret(env, 'JWT_REFRESH_SECRET'), { algorithms: JWT_ALGS });
   if (res.payload.iss !== REMEMBER_ISS) throw new Error('bad remember issuer');
   return res;
 }

@@ -9,8 +9,8 @@ const N = Number(process.argv[2] || 500);
 const env = {
   BASE_URL: 'http://localhost',
   ALLOWED_EMAILS: '*@example.com',
-  JWT_SECRET: 'bench-a',
-  JWT_REFRESH_SECRET: 'bench-r',
+  JWT_SECRET: 'bench-access-secret-0123456789abcdef',
+  JWT_REFRESH_SECRET: 'bench-refresh-secret-0123456789abcd',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
   MAIL_ENABLED: 'false',

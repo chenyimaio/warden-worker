@@ -17,8 +17,8 @@ const check = (name, ok, extra) => {
 
 const base = {
   ALLOWED_EMAILS: '*@example.com',
-  JWT_SECRET: 'k',
-  JWT_REFRESH_SECRET: 'r',
+  JWT_SECRET: 'direct-upload-secret-0123456789abcdef',
+  JWT_REFRESH_SECRET: 'direct-refresh-secret-0123456789abcde',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
   BASE_URL: 'https://vault.example.com',
