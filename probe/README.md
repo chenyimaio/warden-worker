@@ -12,11 +12,15 @@
 
 ### 方式 A：直接上传文件（最快）
 
-只需要一个文件：
+需要两个文件：
 
 ```
-cloud-functions/[[default]].js
+public/index.html                 静态页面（你打开的界面）
+cloud-functions/[[default]].js    函数，只返回 JSON
 ```
+
+> 为什么不能只放一个 js：Makers 会先把 `/` 当静态资源解析，`public/` 为空时
+> 根路径返回平台自己的 404，函数根本不会被调用。页面做成静态文件后 `/` 才可用。
 
 在 EdgeOne Makers 里新建项目，把上面这个文件放到 `cloud-functions/` 目录下即可。
 **不需要** `package.json`、**不需要** `npm install`、**不需要**构建命令。
