@@ -794,9 +794,28 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
           const dev = await store.get(keys.device(user.id, deviceId));
           if (!dev || !safeEqual(dev.value.twofactorRemember, code)) throw new Error('remember mismatch');
         } else if (provider === TFA_RECOVERY) {
-          const stored = String(openSecret(c.env, user.totpRecover) ?? '');
+          const opened = await openSecret(c.env, store, user.totpRecover);
+          if (!opened.ok) {
+            // 密文在但解不开：绝不能当成"没有恢复码"糊弄过去，
+            // 否则用户会看到一个没有任何解释的失败。
+            return c.json(
+              {
+                error: 'Recovery code cannot be verified on this server. Sign in with your authenticator app, then regenerate recovery codes.',
+                code: opened.reason,
+              },
+              503,
+            );
+          }
+          const stored = String(opened.value ?? '');
           if (!stored || !safeEqual(stored.toUpperCase(), code.trim().toUpperCase())) {
             return c.json({ error: 'Recovery code is incorrect' }, 400);
+          }
+          // 旧密钥封装的：顺手用当前密钥重封，完成迁移
+          if (opened.legacy) {
+            const resealed = await sealSecret(c.env, store, stored);
+            await mutate(store, keys.profile(user.id), (cur) =>
+              cur ? { ...cur, totpRecover: resealed, updatedAt: nowIso() } : undefined,
+            ).catch(() => {});
           }
 // recovery code is one-shot: drop 2FA + recover code + remember tokens
           await delTwoFactor(store, user.id, TFA_AUTHENTICATOR);
@@ -1523,10 +1542,11 @@ async function activateAuthenticator(c) {
   });
 
 // generate recovery code on first TOTP activation
-if (!a.user.totpRecover) {
+  if (!a.user.totpRecover) {
     const code = generateRecoveryCode();
+    const sealed = await sealSecret(c.env, store, code);
     await mutate(store, keys.profile(a.claims.sub), (cur) =>
-      cur ? { ...cur, totpRecover: sealSecret(c.env, code), updatedAt: nowIso() } : undefined,
+      cur ? { ...cur, totpRecover: sealed, updatedAt: nowIso() } : undefined,
     );
   }
 
@@ -1579,7 +1599,25 @@ app.post('/api/two-factor/get-recover', async (c) => {
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  return c.json({ code: openSecret(c.env, a.user.totpRecover) ?? null, object: 'twoFactorRecover' });
+  const store = getStore(c.env);
+  const opened = await openSecret(c.env, store, a.user.totpRecover);
+  if (!opened.ok) {
+    return c.json(
+      {
+        error: 'Recovery code cannot be read on this server. Sign in with your authenticator app, then regenerate recovery codes.',
+        code: opened.reason,
+      },
+      503,
+    );
+  }
+  // 旧密钥封装的：读取时顺手迁移到当前密钥
+  if (opened.legacy && opened.value) {
+    const resealed = await sealSecret(c.env, store, opened.value);
+    await mutate(store, keys.profile(a.claims.sub), (cur) =>
+      cur ? { ...cur, totpRecover: resealed, updatedAt: nowIso() } : undefined,
+    ).catch(() => {});
+  }
+  return c.json({ code: opened.value ?? null, object: 'twoFactorRecover' });
 });
 
 // ---------------------------------------------------------------- account ops

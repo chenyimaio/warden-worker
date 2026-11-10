@@ -227,50 +227,129 @@ export function safeEqual(a, b) {
 }
 
 // ---------------------------------------------------------------- 敏感字段落盘加密
-// TOTP 恢复码这类"等同于凭据"的字段，之前是明文躺在 profile 里：只要 Blob 泄露就等于
-// 拿到绕过多因素登录的钥匙。这里用 JWT_SECRET 派生的密钥做 AES-256-GCM 封装，
-// 泄露存储但没拿到 JWT_SECRET 时无法解出。
+// TOTP 恢复码 / TOTP 密钥这类"等同于凭据"的字段，不能明文躺在 profile 里：
+// 只要 Blob 泄露就等于拿到绕过多因素登录的钥匙。这里用 AES-256-GCM 封装。
+//
+// 密钥从哪来？**不能用 JWT_SECRET 派生**：JWT_SECRET 是会被轮换的，
+// 一换所有已存的恢复码就解不开，而 2FA 还开着 —— 用户被永久锁在门外且毫无提示。
+// 也不该为此新增环境变量：多一个必须配对的密钥，运维就多一个把部署搞坏的机会。
+//
+// 做法是让密钥跟着数据走：首次使用时随机生成一把，存进存储的 sys/sealkey.json。
+// 这样轮换 JWT_SECRET 完全不影响已存的恢复码。
+//
+// 取舍：能读 Blob 的人也能读到这把密钥。但能读 Blob 的人已经拿到全部密码哈希和
+// 所有条目密文了，封装的定位是「防意外暴露」（日志、控制台 JSON 预览、导出、
+// 局部误读），不是「防整库沦陷」。两害相权，可恢复性更重要。
 const SEAL_LABEL = 'warden/v1/field-encryption';
 const SEAL_PREFIX = 'enc:v1:';
+const SEAL_KEY_PATH = 'sys/sealkey.json';
 
-function sealKey(env) {
-  // 优先用独立的 SECRET_ENCRYPTION_KEY。没有时才退回 JWT_SECRET（保持既有部署可用）。
-  // 这一点很重要：JWT_SECRET 一换，所有用旧密钥封装的恢复码都会解不开，
-  // 而 2FA 还开着 —— 用户会被彻底锁在门外，且毫无提示。
-  // 单独设一个密钥后，轮换 JWT_SECRET 就不再影响已存的恢复码。
-  const base =
-    env?.SECRET_ENCRYPTION_KEY ??
-    process.env.SECRET_ENCRYPTION_KEY ??
-    env?.JWT_SECRET ??
-    process.env.JWT_SECRET;
-  if (!base) throw new Error('missing secret: JWT_SECRET');
-  return createHash('sha256').update(`${SEAL_LABEL}:${base}`).digest();
+// 存储实例 -> 派生密钥的缓存。按实例缓存，避免每次加解密都读一次存储。
+const sealKeyCache = new WeakMap();
+
+function deriveSealKey(secret) {
+  return createHash('sha256').update(`${SEAL_LABEL}:${secret}`).digest();
 }
 
-export function sealSecret(env, plaintext) {
+// 旧实现直接拿 JWT_SECRET 派生。保留它只为了把已有数据迁移过来，不再用于新写入。
+function legacySealKey(env) {
+  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  return base ? deriveSealKey(base) : null;
+}
+
+/**
+ * 取出（必要时创建）持久化的 seal 密钥。
+ *
+ * 并发首次创建：两个实例可能同时生成并写入，谁最后写谁生效。
+ * 写入后统一回读，双方都用回读到的那把，不会出现"我加密用 A、他解密用 B"。
+ */
+export async function getSealKey(store, env) {
+  if (!store) throw new Error('getSealKey requires a store');
+  const cached = sealKeyCache.get(store);
+  if (cached) return cached;
+
+  let secret = null;
+  try {
+    const cur = (await store.get(SEAL_KEY_PATH))?.value;
+    if (cur?.secret) secret = String(cur.secret);
+  } catch {
+    /* 读不到就尝试创建 */
+  }
+
+  if (!secret) {
+    const candidate = randomBytes(32).toString('base64url');
+    try {
+      await store.put(SEAL_KEY_PATH, { secret: candidate, createdAt: new Date().toISOString() });
+    } catch {
+      /* 已存在会被覆盖不影响：下面回读为准 */
+    }
+    // 回读为准，避免并发下各用各的
+    try {
+      const after = (await store.get(SEAL_KEY_PATH))?.value;
+      if (after?.secret) secret = String(after.secret);
+    } catch {
+      /* 回读失败就先用候选值 */
+    }
+    if (!secret) secret = candidate;
+  }
+
+  const key = deriveSealKey(secret);
+  sealKeyCache.set(store, key);
+  return key;
+}
+
+export async function sealSecret(env, store, plaintext) {
   const text = String(plaintext ?? '');
   if (!text) return null;
+  const key = await getSealKey(store, env);
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', sealKey(env), iv);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `${SEAL_PREFIX}${Buffer.concat([iv, tag, ct]).toString('base64url')}`;
 }
 
-/** 兼容历史明文数据：解不开或不是封装格式时原样返回 */
-export function openSecret(env, stored) {
+/**
+ * 解封。返回值区分三种状态，避免"解不开"被当成"没有值"静默吞掉：
+ *   { ok: true,  value }        解出来了（含历史明文，原样返回）
+ *   { ok: true,  value: null }  本来就没有值
+ *   { ok: false, reason }       有密文但解不开 —— 调用方必须显式处理，不能当空值
+ *
+ * 解不开时先按旧密钥（JWT_SECRET 派生）再试一次，成功就顺手用新密钥重封，
+ * 让升级前写入的数据自动迁移，不需要任何人工操作。
+ */
+export async function openSecret(env, store, stored) {
   const raw = String(stored ?? '');
-  if (!raw) return null;
-  if (!raw.startsWith(SEAL_PREFIX)) return raw;
-  try {
-    const buf = Buffer.from(raw.slice(SEAL_PREFIX.length), 'base64url');
-    const iv = buf.subarray(0, 12);
-    const tag = buf.subarray(12, 28);
-    const ct = buf.subarray(28);
-    const d = createDecipheriv('aes-256-gcm', sealKey(env), iv);
+  if (!raw) return { ok: true, value: null };
+  if (!raw.startsWith(SEAL_PREFIX)) return { ok: true, value: raw, legacy: false };
+
+  const buf = Buffer.from(raw.slice(SEAL_PREFIX.length), 'base64url');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const ct = buf.subarray(28);
+
+  const attempt = (key) => {
+    const d = createDecipheriv('aes-256-gcm', key, iv);
     d.setAuthTag(tag);
     return Buffer.concat([d.update(ct), d.final()]).toString('utf8');
+  };
+
+  try {
+    const key = await getSealKey(store, env);
+    return { ok: true, value: attempt(key), legacy: false };
   } catch {
-    return null;
+    /* 落到旧密钥重试 */
   }
+
+  const legacy = legacySealKey(env);
+  if (legacy) {
+    try {
+      const value = attempt(legacy);
+      // 解密成功说明是旧密钥的数据：调用方应重新封装一次完成迁移
+      return { ok: true, value, legacy: true };
+    } catch {
+      /* 确实解不开 */
+    }
+  }
+  return { ok: false, reason: 'sealed-secret-unreadable' };
 }

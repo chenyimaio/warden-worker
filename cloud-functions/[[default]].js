@@ -14716,35 +14716,79 @@ function safeEqual(a, b) {
 }
 var SEAL_LABEL = "warden/v1/field-encryption";
 var SEAL_PREFIX = "enc:v1:";
-function sealKey(env) {
-  const base = env?.SECRET_ENCRYPTION_KEY ?? process.env.SECRET_ENCRYPTION_KEY ?? env?.JWT_SECRET ?? process.env.JWT_SECRET;
-  if (!base) throw new Error("missing secret: JWT_SECRET");
-  return createHash("sha256").update(`${SEAL_LABEL}:${base}`).digest();
+var SEAL_KEY_PATH = "sys/sealkey.json";
+var sealKeyCache = /* @__PURE__ */ new WeakMap();
+function deriveSealKey(secret2) {
+  return createHash("sha256").update(`${SEAL_LABEL}:${secret2}`).digest();
 }
-function sealSecret(env, plaintext) {
+function legacySealKey(env) {
+  const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
+  return base ? deriveSealKey(base) : null;
+}
+async function getSealKey(store, env) {
+  if (!store) throw new Error("getSealKey requires a store");
+  const cached = sealKeyCache.get(store);
+  if (cached) return cached;
+  let secret2 = null;
+  try {
+    const cur = (await store.get(SEAL_KEY_PATH))?.value;
+    if (cur?.secret) secret2 = String(cur.secret);
+  } catch {
+  }
+  if (!secret2) {
+    const candidate = randomBytes(32).toString("base64url");
+    try {
+      await store.put(SEAL_KEY_PATH, { secret: candidate, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+    } catch {
+    }
+    try {
+      const after = (await store.get(SEAL_KEY_PATH))?.value;
+      if (after?.secret) secret2 = String(after.secret);
+    } catch {
+    }
+    if (!secret2) secret2 = candidate;
+  }
+  const key = deriveSealKey(secret2);
+  sealKeyCache.set(store, key);
+  return key;
+}
+async function sealSecret(env, store, plaintext) {
   const text = String(plaintext ?? "");
   if (!text) return null;
+  const key = await getSealKey(store, env);
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sealKey(env), iv);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ct = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
   const tag2 = cipher.getAuthTag();
   return `${SEAL_PREFIX}${Buffer.concat([iv, tag2, ct]).toString("base64url")}`;
 }
-function openSecret(env, stored) {
+async function openSecret(env, store, stored) {
   const raw2 = String(stored ?? "");
-  if (!raw2) return null;
-  if (!raw2.startsWith(SEAL_PREFIX)) return raw2;
-  try {
-    const buf = Buffer.from(raw2.slice(SEAL_PREFIX.length), "base64url");
-    const iv = buf.subarray(0, 12);
-    const tag2 = buf.subarray(12, 28);
-    const ct = buf.subarray(28);
-    const d = createDecipheriv("aes-256-gcm", sealKey(env), iv);
+  if (!raw2) return { ok: true, value: null };
+  if (!raw2.startsWith(SEAL_PREFIX)) return { ok: true, value: raw2, legacy: false };
+  const buf = Buffer.from(raw2.slice(SEAL_PREFIX.length), "base64url");
+  const iv = buf.subarray(0, 12);
+  const tag2 = buf.subarray(12, 28);
+  const ct = buf.subarray(28);
+  const attempt = (key) => {
+    const d = createDecipheriv("aes-256-gcm", key, iv);
     d.setAuthTag(tag2);
     return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+  };
+  try {
+    const key = await getSealKey(store, env);
+    return { ok: true, value: attempt(key), legacy: false };
   } catch {
-    return null;
   }
+  const legacy = legacySealKey(env);
+  if (legacy) {
+    try {
+      const value = attempt(legacy);
+      return { ok: true, value, legacy: true };
+    } catch {
+    }
+  }
+  return { ok: false, reason: "sealed-secret-unreadable" };
 }
 
 // src/store.js
@@ -15718,9 +15762,28 @@ app.post("/identity/connect/token", async (c) => {
           const dev = await store.get(keys.device(user.id, deviceId));
           if (!dev || !safeEqual(dev.value.twofactorRemember, code)) throw new Error("remember mismatch");
         } else if (provider === TFA_RECOVERY) {
-          const stored = String(openSecret(c.env, user.totpRecover) ?? "");
+          const opened = await openSecret(c.env, store, user.totpRecover);
+          if (!opened.ok) {
+            return c.json(
+              {
+                error: "Recovery code cannot be verified on this server. Sign in with your authenticator app, then regenerate recovery codes.",
+                code: opened.reason
+              },
+              503
+            );
+          }
+          const stored = String(opened.value ?? "");
           if (!stored || !safeEqual(stored.toUpperCase(), code.trim().toUpperCase())) {
             return c.json({ error: "Recovery code is incorrect" }, 400);
+          }
+          if (opened.legacy) {
+            const resealed = await sealSecret(c.env, store, stored);
+            await mutate(
+              store,
+              keys.profile(user.id),
+              (cur) => cur ? { ...cur, totpRecover: resealed, updatedAt: nowIso() } : void 0
+            ).catch(() => {
+            });
           }
           await delTwoFactor(store, user.id, TFA_AUTHENTICATOR);
           await mutate(
@@ -16371,10 +16434,11 @@ async function activateAuthenticator(c) {
   });
   if (!a.user.totpRecover) {
     const code = generateRecoveryCode();
+    const sealed = await sealSecret(c.env, store, code);
     await mutate(
       store,
       keys.profile(a.claims.sub),
-      (cur) => cur ? { ...cur, totpRecover: sealSecret(c.env, code), updatedAt: nowIso() } : void 0
+      (cur) => cur ? { ...cur, totpRecover: sealed, updatedAt: nowIso() } : void 0
     );
   }
   return c.json({ enabled: true, key, object: "twoFactorAuthenticator" });
@@ -16420,7 +16484,27 @@ app.post("/api/two-factor/get-recover", async (c) => {
   const p = await body(c);
   const check = await checkPassword(c, a.user, p);
   if (check.error) return c.json({ error: check.error, message: check.error, statusCode: check.status }, check.status);
-  return c.json({ code: openSecret(c.env, a.user.totpRecover) ?? null, object: "twoFactorRecover" });
+  const store = getStore2(c.env);
+  const opened = await openSecret(c.env, store, a.user.totpRecover);
+  if (!opened.ok) {
+    return c.json(
+      {
+        error: "Recovery code cannot be read on this server. Sign in with your authenticator app, then regenerate recovery codes.",
+        code: opened.reason
+      },
+      503
+    );
+  }
+  if (opened.legacy && opened.value) {
+    const resealed = await sealSecret(c.env, store, opened.value);
+    await mutate(
+      store,
+      keys.profile(a.claims.sub),
+      (cur) => cur ? { ...cur, totpRecover: resealed, updatedAt: nowIso() } : void 0
+    ).catch(() => {
+    });
+  }
+  return c.json({ code: opened.value ?? null, object: "twoFactorRecover" });
 });
 app.post("/api/accounts/password", async (c) => {
   const a = await requireAuth(c);

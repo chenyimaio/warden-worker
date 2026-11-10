@@ -1356,6 +1356,46 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('附件下载字节正确', r.rawText === 'XYZ' || r.data === 'XYZ' || String(r.rawText) === 'XYZ', r.rawText);
 }
 
+// 35. L-20：轮换 JWT_SECRET 不能弄坏已存的恢复码（seal 密钥持久化在存储里）
+{
+  const { sealSecret, openSecret } = await import('../src/crypto.js');
+  const { MemoryStore } = await import('../src/store.js');
+
+  const store = new MemoryStore();
+  const before = { JWT_SECRET: 'rotate-test-secret-BEFORE-0123456789' };
+  const after = { JWT_SECRET: 'rotate-test-secret-AFTER-9999999999' };
+
+  const sealed = await sealSecret(before, store, 'RECOVERY-CODE-XYZ');
+  const o1 = await openSecret(before, store, sealed);
+  check('seal 基本加解密', o1.ok && o1.value === 'RECOVERY-CODE-XYZ', o1);
+
+  const o2 = await openSecret(after, store, sealed);
+  check('轮换 JWT_SECRET 后仍能解开（核心）', o2.ok && o2.value === 'RECOVERY-CODE-XYZ', o2);
+
+  const keyFile = (await store.get('sys/sealkey.json'))?.value;
+  check('seal 密钥持久化在 sys/sealkey.json（不依赖环境变量）', Boolean(keyFile?.secret), keyFile);
+
+  // 损坏的密文必须 ok:false，不能静默当成"没有恢复码"
+  const bogus = sealed.slice(0, -6) + 'AAAAAA';
+  const o3 = await openSecret(after, store, bogus);
+  check('损坏密文返回 ok:false（不静默吞掉）', o3.ok === false && o3.reason === 'sealed-secret-unreadable', o3);
+
+  // 旧密钥（JWT_SECRET 派生）写的历史数据要能解，并标记 legacy 供调用方迁移
+  const { createHash, createCipheriv, randomBytes } = await import('node:crypto');
+  const legacyKey = createHash('sha256').update(`warden/v1/field-encryption:${before.JWT_SECRET}`).digest();
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', legacyKey, iv);
+  const ctBuf = Buffer.concat([c.update('OLD-CODE-ABC', 'utf8'), c.final()]);
+  const legacyBlob = `enc:v1:${Buffer.concat([iv, c.getAuthTag(), ctBuf]).toString('base64url')}`;
+  const fresh = new MemoryStore();
+  const o4 = await openSecret(before, fresh, legacyBlob);
+  check('旧密钥历史数据可解并标记 legacy', o4.ok && o4.value === 'OLD-CODE-ABC' && o4.legacy === true, o4);
+
+  // 历史明文（未封装）原样返回
+  const o5 = await openSecret(after, fresh, 'PLAIN-HINT');
+  check('历史明文原样返回', o5.ok && o5.value === 'PLAIN-HINT', o5);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {

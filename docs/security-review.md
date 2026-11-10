@@ -444,7 +444,7 @@ if (fails >= SEND_PW_SOFT_CAP) {
 | **L-17** 流式下载 `content-length` 取自 `head()` | **成立**。根因在 `MemoryStore.head()`：二进制返回 `JSON.stringify(buffer).length`，3 字节变 35。线上 Blob 走元数据所以正常，但一旦偏差就截断/挂起 | `head()` 区分 Buffer 与 JSON 返回真实字节数；流式分支**不再设** `content-length`（chunked 传输没有这个风险）。实测下载 3 字节、无该头、内容正确 |
 | **L-18** 未配置分支打印完整邮箱 + `from` 可污染邮件头 | **成立** | 未配置分支改用 `maskEmail`；新增 `isSafeMailAddress()` 挡住 CR/LF 与尖括号，`MAIL_FROM_NAME` 剔除 `"<>` 并截断 120 字符 |
 | **L-19** TOTP 用 `===`；`ALLOW_TOTP_DRIFT` 默认 true | **成立** | 改用 `safeEqual`。`validateTotp` 的 `step <= lastUsed` 已经防重放，漂移窗口是可配置项，保留默认 `true` 以兼容时钟偏差，已在 README 表格写明 |
-| **L-20** `sealSecret` 密钥由 `JWT_SECRET` 派生 | **成立且后果严重**：轮换 `JWT_SECRET` 后所有已存恢复码失效，而 2FA 还开着 → 用户被永久锁在门外 | 新增 `SECRET_ENCRYPTION_KEY`（≥32 字符），优先使用；未配置时退回 `JWT_SECRET` 保持兼容。实测：轮换 `JWT_SECRET` + 保留 `SECRET_ENCRYPTION_KEY` → 旧恢复码仍可解密 |
+| **L-20** `sealSecret` 密钥由 `JWT_SECRET` 派生 | **成立且后果严重**：轮换 `JWT_SECRET` 后所有已存恢复码失效，而 2FA 还开着 → 用户被永久锁在门外 | 见下方「L-20 修订」 |
 | **L-21** `store.list()` 忽略分页 | **误报**。`@edgeone/pages-blob` 的 `ListOptions.paginate` **默认 `true`**，SDK 内部自动聚合全部页（见 `index.d.ts:54-55`） | 不改。已在复核记录中说明依据 |
 | **L-22** 运维脚本持有 `BLOB_TOKEN` | **成立**（属凭据等级问题，不是漏洞） | `set-hint` / `peek-profile` / `repair-profile` 三个脚本头部加统一警示：等价于 Blob 完全读写权限、能读任意账号哈希与明文提示、仅限临时运维使用 |
 | **L-23** 附件票据用 `:` 拼接再 `split` | **成立**（当前字段都是 UUID 所以安全，但脆弱） | 改成 JSON payload（`{u,a,e,s}`），并**保留旧格式解析**平滑过渡。实测新票据可解析、旧票据仍可用、过期票据返回 null |
@@ -454,6 +454,52 @@ if (fails >= SEND_PW_SOFT_CAP) {
 > 结果 404 被误读成「下载坏了」。和之前 bulk 路由用错方法同一类错误 —— 复核脚本本身也要核对方法。
 
 新增回归（smoke 第 34 节，共 6 条）：软上限触发后立即 429 且 <200ms、6 并发总耗时 <400ms、软上限后正确口令仍 200、附件上传 200、下载不设 content-length、下载字节正确。
+
+### L-20 修订：不新增环境变量，让密钥跟着数据走
+
+第一版修法是加 `SECRET_ENCRYPTION_KEY`。这不对：**多一个必须配对的密钥，
+运维就多一个把部署搞坏的机会**，而且漏配时会静默退回有问题的旧行为。
+
+真正的需求是「轮换 `JWT_SECRET` 不能弄坏已存的恢复码」。解法不是再加一把配置密钥，
+而是**让 seal 密钥不再依赖任何环境变量**：
+
+```js
+// 首次使用时随机生成 32 字节，存进存储的 sys/sealkey.json
+const key = await getSealKey(store, env);   // 按 store 实例缓存，不重复读
+```
+
+写入后**回读为准**：两个实例同时首次生成时，谁最后写谁生效，双方都用回读到的那把，
+不会出现「我加密用 A、他解密用 B」。
+
+同时把三个静默行为修掉：
+
+| 场景 | 旧 | 新 |
+|---|---|---|
+| 有密文但解不开 | 返回 `null`（看起来像"没有恢复码"） | `{ok:false, reason}`，调用方返回 503 并给出明确指引 |
+| 旧密钥写的历史数据 | 解不开 | 用 JWT_SECRET 派生密钥重试，成功则**顺手用新密钥重封**完成迁移 |
+| 历史明文 | 原样返回 | 原样返回（保持） |
+
+### 端到端实测
+
+```
+开启 TOTP -> 200，恢复码 PCEG****
+---- 轮换 JWT_SECRET ----
+轮换后登录（应要求 2FA）-> 400 ✅
+用 TOTP 登录 -> ✅
+轮换后读恢复码 -> ✅ 与轮换前完全一致（核心修复生效）
+用恢复码过 2FA -> ✅ 拿到 token
+```
+
+单元层 6 条：基本加解密、轮换后仍可解、密钥确实落在 `sys/sealkey.json`、
+损坏密文返回 `ok:false`、旧密钥数据可解并标 `legacy`、历史明文原样返回。
+
+### 取舍说明
+
+`sys/sealkey.json` 和密文在同一个存储里。能读 Blob 的人也能读到这把密钥 ——
+但那个人已经拿到全部密码哈希和所有条目密文了。封装的定位是「防意外暴露」
+（日志、控制台 JSON 预览、导出、局部误读），不是「防整库沦陷」。
+两害相权，**可恢复性更重要**：恢复码失效意味着用户永久失去账号。
+
 
 
 
