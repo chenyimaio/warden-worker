@@ -2139,6 +2139,10 @@ async function checkSendPassword(s, candidate) {
 // send.failedAttempts 仍然记录，供属主判断"这条链接正在被爆破"。
 const SEND_PW_MAX_FAILS_PER_MIN = 10;
 const SEND_PW_SUSPICIOUS_AFTER = 5;
+// 单条 Send 的累计失败软上限：到线后给「错误口令」加延迟，把跨 IP 的爆破速率压下来。
+// 注意**正确口令不受影响** —— 上一版按 Send 硬锁会让人 5 次错口令就锁死别人的链接。
+const SEND_PW_SOFT_CAP = 50;
+const SEND_PW_COOLDOWN_DELAY_MS = 600;
 
 async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
@@ -2175,6 +2179,13 @@ async function verifySendPassword(c, store, send, candidate) {
   await mutate(store, keys.send(send.userId, send.id), (x) =>
     x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : undefined,
   ).catch(() => {});
+
+  if (fails >= SEND_PW_SOFT_CAP) {
+    // 软上限：只拖慢错误口令。跨 IP 的爆破会在这里被整体降速，
+    // 而拿到正确口令的接收方走的是上面那条分支，完全不受影响。
+    await new Promise((r) => setTimeout(r, SEND_PW_COOLDOWN_DELAY_MS));
+    return { ok: false, coolingDown: true, error: 'Too many failed attempts on this link' };
+  }
   return {
     ok: false,
     suspicious: fails >= SEND_PW_SUSPICIOUS_AFTER,
@@ -2863,30 +2874,57 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
   }
 
   const store = getStore(c.env);
-  const [cipherIdx, folderIdx] = await Promise.all([
+  const [cipherIdx, folderIdx, sendIdx] = await Promise.all([
     store.list(keys.ciphers(a.claims.sub)),
     store.list(keys.folders(a.claims.sub)),
+    store.list(keys.sends(a.claims.sub)),
   ]);
   const curCiphers = (await mapLimit(cipherIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
   const curFolders = (await mapLimit(folderIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
+  // sends 目录里还有 .bin（文件 Send 的字节），只取元数据
+  const sendMetaIdx = sendIdx.filter((it) => it.key.endsWith('.json'));
+  const curSends = (await mapLimit(sendMetaIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
 
   const reqCiphers = Array.isArray(p.accountData?.ciphers) ? p.accountData.ciphers : [];
   const reqFolders = Array.isArray(p.accountData?.folders) ? p.accountData.folders : [];
+  const reqSends = Array.isArray(p.accountData?.sends) ? p.accountData.sends : [];
 
-  if (reqCiphers.length !== curCiphers.length || reqFolders.length !== curFolders.length) {
-    return c.json({ error: 'All existing ciphers and folders must be included in the rotation' }, 400);
+  // 完整性校验：三个集合都必须全量提交。
+  // 少提交任何一个，它就不会被重新加密，而 profile.key 已经换掉 —— 那条数据永久解不开，
+  // 接口却返回 200，用户完全无感知。宁可 400 让客户端升级，也不能静默丢数据。
+  const INCOMPLETE = 'All existing ciphers, folders and sends must be included in the rotation';
+  if (
+    reqCiphers.length !== curCiphers.length ||
+    reqFolders.length !== curFolders.length ||
+    reqSends.length !== curSends.length
+  ) {
+    return c.json({ error: INCOMPLETE }, 400);
   }
   const cipherIds = new Set(curCiphers.map((x) => x.id));
   for (const rc of reqCiphers) {
-    if (!rc?.id || !cipherIds.has(rc.id)) {
-      return c.json({ error: 'All existing ciphers and folders must be included in the rotation' }, 400);
-    }
+    if (!validId(rc?.id) || !cipherIds.has(rc.id)) return c.json({ error: INCOMPLETE }, 400);
   }
   const folderIds = new Set(curFolders.map((x) => x.id));
   for (const rf of reqFolders) {
-    if (!rf?.id || !folderIds.has(rf.id)) {
-      return c.json({ error: 'All existing ciphers and folders must be included in the rotation' }, 400);
+    if (!validId(rf?.id) || !folderIds.has(rf.id)) return c.json({ error: INCOMPLETE }, 400);
+  }
+  const sendIds = new Set(curSends.map((x) => x.id));
+  for (const rs of reqSends) {
+    if (!validId(rs?.id) || !sendIds.has(rs.id)) return c.json({ error: INCOMPLETE }, 400);
+  }
+
+  // folderId 归属也要在写入之前全部验完：任何一条不合法就整体 400。
+  // 之前是在写入循环里 continue 跳过，前面的条目已经用新密钥重写，
+  // 跳过的那些仍是旧密钥 —— 半轮换等于静默数据丢失。
+  const rotFolderIdOf = new Map();
+  for (const rc of reqCiphers) {
+    if (rc.folderId === undefined || rc.folderId === null || rc.folderId === '') {
+      rotFolderIdOf.set(rc.id, undefined);
+      continue;
     }
+    const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
+    if (folder.error) return c.json({ error: folder.error }, 400);
+    rotFolderIdOf.set(rc.id, folder.folderId);
   }
 
   // 先校验再动数据：下面会重写所有 entries，如果走到最后才发现缺字段而返回 400，
@@ -2904,21 +2942,14 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
     );
   }
   for (const rc of reqCiphers) {
-    if (!validId(rc?.id)) continue;
     const data = cipherDataFrom(rc);
-    // folderId 归属校验：轮换请求是客户端发来的，不能直接采信
-    let rotFolderId;
-    if (rc.folderId !== undefined) {
-      const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
-      if (folder.error) continue;
-      rotFolderId = folder.folderId;
-    }
+    const fid = rotFolderIdOf.get(rc.id);
     await mutate(store, keys.cipher(a.claims.sub, String(rc.id)), (cur) =>
       cur
         ? {
             ...cur,
             data: { ...cur.data, ...data },
-            folderId: rotFolderId !== undefined ? rotFolderId : cur.folderId,
+            folderId: fid !== undefined ? fid : cur.folderId,
             favorite: rc.favorite !== undefined ? Boolean(rc.favorite) : cur.favorite,
             updatedAt: nowIso(),
           }
@@ -2930,8 +2961,7 @@ app.post('/api/accounts/key-management/rotate-user-account-keys', async (c) => {
       );
     }
   }
-  for (const rs of Array.isArray(p.accountData?.sends) ? p.accountData.sends : []) {
-    if (!validId(rs?.id)) continue;
+  for (const rs of reqSends) {
     await mutate(store, keys.send(a.claims.sub, String(rs.id)), (cur) =>
       cur
         ? {

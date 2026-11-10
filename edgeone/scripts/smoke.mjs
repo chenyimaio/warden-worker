@@ -1147,6 +1147,132 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('打满的 IP 在窗口内被限速（范围仅限该 IP + 该 Send）', r.status === 401 && /Too many/i.test(String(r.data?.error ?? '')), r);
 }
 
+// 33. 安全回归（第六轮）：密钥轮换必须是全有或全无，不能半轮换丢数据
+{
+  const mkUser = async (tag) => {
+    const addr = `${tag}-${Date.now()}@example.com`;
+    await call('POST', '/api/accounts/register', {
+      body: {
+        email: addr, masterPasswordHash: `${tag}-mph`, userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    return { addr, tok: (await call('POST', '/identity/connect/token', {
+      form: {
+        grant_type: 'password', username: addr, password: `${tag}-mph`, scope: 'api offline_access',
+        client_id: 'web', deviceType: '10', deviceIdentifier: `dev-${tag}`, deviceName: tag,
+      },
+    })).data?.access_token };
+  };
+  const owner = await mkUser('rot');
+  const other = await mkUser('rotother');
+
+  const d = new Date(Date.now() + 86400e3).toISOString();
+  r = await call('POST', '/api/ciphers', { token: owner.tok, body: { type: 1, name: '2.skip', login: { username: 'u' } } });
+  const rk1 = r.data?.id;
+  r = await call('POST', '/api/ciphers', { token: owner.tok, body: { type: 1, name: '2.keep', login: { username: 'u2' } } });
+  const rk2 = r.data?.id;
+  r = await call('POST', '/api/sends', {
+    token: owner.tok,
+    body: { type: 0, key: '2.OLD-AKEY', name: '2.send', text: { text: '2.old' }, deletionDate: d },
+  });
+  const rSend = r.data?.id;
+
+  r = await call('POST', '/api/folders', { token: other.tok, body: { name: 'other-folder' } });
+  const otherFolder = r.data?.id;
+
+  const rotBase = {
+    oldMasterKeyAuthenticationHash: 'rot-mph',
+    accountUnlockData: {
+      masterPasswordUnlockData: {
+        kdfType: 0, kdfIterations: 100000, email: owner.addr,
+        masterKeyAuthenticationHash: 'rot-mph-2', masterKeyEncryptedUserKey: '2.NEWKEY|iv|ct',
+      },
+    },
+    accountKeys: { accountPublicKey: 'pub' },
+  };
+
+  // 路径 A：条目带他人的 folderId -> 必须整体 400，且一条都不能被改
+  r = await call('POST', '/api/accounts/key-management/rotate-user-account-keys', {
+    token: owner.tok,
+    body: {
+      ...rotBase,
+      accountData: {
+        ciphers: [
+          { id: rk1, type: 1, name: '2.skip-rot', login: { username: 'u' } },
+          { id: rk2, type: 1, name: '2.keep-rot', login: { username: 'u2' }, folderId: otherFolder },
+        ],
+        folders: [],
+        sends: [{ id: rSend, key: '2.NEW-AKEY', name: '2.send-rot' }],
+      },
+    },
+  });
+  check('轮换带他人 folderId -> 400（整体拒绝）', r.status === 400, r);
+
+  // 数据必须原封不动
+  r = await call('GET', '/api/sync', { token: owner.tok });
+  const namesAfter = (r.data?.ciphers ?? []).map((x) => x.name).sort();
+  check('拒绝后 cipher 未被改名（没有半轮换）', namesAfter.join(',') === '2.keep,2.skip', namesAfter);
+
+  // 旧口令仍能登录，说明 profile 没被换
+  r = await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: owner.addr, password: 'rot-mph', scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'rot-check', deviceName: 'chk',
+    },
+  });
+  check('拒绝后旧口令仍可登录（profile 未被换）', r.status === 200, r);
+
+  // 路径 B：用户有 Send 但不提交 -> 必须 400，否则那条 Send 永久解不开
+  r = await call('POST', '/api/accounts/key-management/rotate-user-account-keys', {
+    token: owner.tok,
+    body: {
+      ...rotBase,
+      accountData: {
+        ciphers: [
+          { id: rk1, type: 1, name: '2.skip', login: { username: 'u' } },
+          { id: rk2, type: 1, name: '2.keep', login: { username: 'u2' } },
+        ],
+        folders: [],
+      },
+    },
+  });
+  check('轮换不带 sends -> 400（不静默丢数据）', r.status === 400, r);
+
+  // 正常全量轮换应当成功，且所有东西都换了
+  r = await call('POST', '/api/accounts/key-management/rotate-user-account-keys', {
+    token: owner.tok,
+    body: {
+      ...rotBase,
+      accountData: {
+        ciphers: [
+          { id: rk1, type: 1, name: '2.skip-rot', login: { username: 'u' } },
+          { id: rk2, type: 1, name: '2.keep-rot', login: { username: 'u2' } },
+        ],
+        folders: [],
+        sends: [{ id: rSend, key: '2.NEW-AKEY', name: '2.send-rot' }],
+      },
+    },
+  });
+  check('全量轮换 -> 200', r.status === 200, r);
+
+  // 轮换会换 securityStamp 踢掉旧 token，用新口令重新登录再验证
+  r = await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: owner.addr, password: 'rot-mph-2', scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'rot-after', deviceName: 'after',
+    },
+  });
+  const tokAfter = r.data?.access_token;
+  check('轮换后新口令可登录', !!tokAfter, r);
+
+  r = await call('GET', '/api/sync', { token: tokAfter });
+  check('轮换后 cipher 全部改名', (r.data?.ciphers ?? []).map((x) => x.name).sort().join(',') === '2.keep-rot,2.skip-rot', r.data?.ciphers);
+  r = await call('GET', '/api/sends', { token: tokAfter });
+  const rotSend = (r.data?.data ?? [])[0];
+  check('轮换后 send akey 已更新', rotSend?.key === '2.NEW-AKEY', rotSend);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {

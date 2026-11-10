@@ -16823,6 +16823,8 @@ async function checkSendPassword(s, candidate) {
 }
 var SEND_PW_MAX_FAILS_PER_MIN = 10;
 var SEND_PW_SUSPICIOUS_AFTER = 5;
+var SEND_PW_SOFT_CAP = 50;
+var SEND_PW_COOLDOWN_DELAY_MS = 600;
 async function verifySendPassword(c, store, send, candidate) {
   if (!sendHasPassword(send)) return { ok: true };
   const ip = requestIp(c) ?? "no-ip";
@@ -16861,6 +16863,10 @@ async function verifySendPassword(c, store, send, candidate) {
     (x) => x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : void 0
   ).catch(() => {
   });
+  if (fails >= SEND_PW_SOFT_CAP) {
+    await new Promise((r) => setTimeout(r, SEND_PW_COOLDOWN_DELAY_MS));
+    return { ok: false, coolingDown: true, error: "Too many failed attempts on this link" };
+  }
   return {
     ok: false,
     suspicious: fails >= SEND_PW_SUSPICIOUS_AFTER,
@@ -17429,28 +17435,43 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
     return c.json({ error: "Changing the asymmetric keypair is not supported during key rotation" }, 400);
   }
   const store = getStore2(c.env);
-  const [cipherIdx, folderIdx] = await Promise.all([
+  const [cipherIdx, folderIdx, sendIdx] = await Promise.all([
     store.list(keys.ciphers(a.claims.sub)),
-    store.list(keys.folders(a.claims.sub))
+    store.list(keys.folders(a.claims.sub)),
+    store.list(keys.sends(a.claims.sub))
   ]);
   const curCiphers = (await mapLimit(cipherIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
   const curFolders = (await mapLimit(folderIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
+  const sendMetaIdx = sendIdx.filter((it) => it.key.endsWith(".json"));
+  const curSends = (await mapLimit(sendMetaIdx, 16, async (it) => (await store.get(it.key))?.value)).filter(Boolean);
   const reqCiphers = Array.isArray(p.accountData?.ciphers) ? p.accountData.ciphers : [];
   const reqFolders = Array.isArray(p.accountData?.folders) ? p.accountData.folders : [];
-  if (reqCiphers.length !== curCiphers.length || reqFolders.length !== curFolders.length) {
-    return c.json({ error: "All existing ciphers and folders must be included in the rotation" }, 400);
+  const reqSends = Array.isArray(p.accountData?.sends) ? p.accountData.sends : [];
+  const INCOMPLETE = "All existing ciphers, folders and sends must be included in the rotation";
+  if (reqCiphers.length !== curCiphers.length || reqFolders.length !== curFolders.length || reqSends.length !== curSends.length) {
+    return c.json({ error: INCOMPLETE }, 400);
   }
   const cipherIds = new Set(curCiphers.map((x) => x.id));
   for (const rc of reqCiphers) {
-    if (!rc?.id || !cipherIds.has(rc.id)) {
-      return c.json({ error: "All existing ciphers and folders must be included in the rotation" }, 400);
-    }
+    if (!validId(rc?.id) || !cipherIds.has(rc.id)) return c.json({ error: INCOMPLETE }, 400);
   }
   const folderIds = new Set(curFolders.map((x) => x.id));
   for (const rf of reqFolders) {
-    if (!rf?.id || !folderIds.has(rf.id)) {
-      return c.json({ error: "All existing ciphers and folders must be included in the rotation" }, 400);
+    if (!validId(rf?.id) || !folderIds.has(rf.id)) return c.json({ error: INCOMPLETE }, 400);
+  }
+  const sendIds = new Set(curSends.map((x) => x.id));
+  for (const rs of reqSends) {
+    if (!validId(rs?.id) || !sendIds.has(rs.id)) return c.json({ error: INCOMPLETE }, 400);
+  }
+  const rotFolderIdOf = /* @__PURE__ */ new Map();
+  for (const rc of reqCiphers) {
+    if (rc.folderId === void 0 || rc.folderId === null || rc.folderId === "") {
+      rotFolderIdOf.set(rc.id, void 0);
+      continue;
     }
+    const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
+    if (folder.error) return c.json({ error: folder.error }, 400);
+    rotFolderIdOf.set(rc.id, folder.folderId);
   }
   const rotationMph = String(unlock.masterKeyAuthenticationHash ?? "");
   if (!rotationMph) return c.json({ error: "Missing masterKeyAuthenticationHash" }, 400);
@@ -17463,21 +17484,15 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
     );
   }
   for (const rc of reqCiphers) {
-    if (!validId(rc?.id)) continue;
     const data = cipherDataFrom(rc);
-    let rotFolderId;
-    if (rc.folderId !== void 0) {
-      const folder = await requireOwnFolder(store, a.claims.sub, rc.folderId);
-      if (folder.error) continue;
-      rotFolderId = folder.folderId;
-    }
+    const fid = rotFolderIdOf.get(rc.id);
     await mutate(
       store,
       keys.cipher(a.claims.sub, String(rc.id)),
       (cur) => cur ? {
         ...cur,
         data: { ...cur.data, ...data },
-        folderId: rotFolderId !== void 0 ? rotFolderId : cur.folderId,
+        folderId: fid !== void 0 ? fid : cur.folderId,
         favorite: rc.favorite !== void 0 ? Boolean(rc.favorite) : cur.favorite,
         updatedAt: nowIso()
       } : void 0
@@ -17490,8 +17505,7 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
       );
     }
   }
-  for (const rs of Array.isArray(p.accountData?.sends) ? p.accountData.sends : []) {
-    if (!validId(rs?.id)) continue;
+  for (const rs of reqSends) {
     await mutate(
       store,
       keys.send(a.claims.sub, String(rs.id)),

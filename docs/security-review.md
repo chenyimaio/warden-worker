@@ -318,6 +318,90 @@ if (await checkSendPassword(send, candidate)) { ...clear both...; return { ok: t
 
 新增回归（smoke 第 32 节补充）：第三方同 IP 打满后另一 IP 用正确口令仍 200、打满的 IP 在窗口内被限速且提示明确、`{ids:[""]}` → 400、不传 id 创建 → 200。
 
+---
+
+## 十五、M-8：密钥轮换的「半轮换」会静默丢数据
+
+### 路径 A（上一轮我引入的）
+
+```js
+for (const rc of reqCiphers) {
+  if (!validId(rc?.id)) continue;            // ← 静默跳过
+  const folder = await requireOwnFolder(...);
+  if (folder.error) continue;                // ← 静默跳过
+  await mutate(...);                          // 前面的条目已经用新密钥写完了
+}
+```
+
+轮换前 `["2.skip", "2.keep"]`，请求里第二条带了他人的 folderId：
+
+```
+轮换返回: 200 {}
+profile.key: 2.k → 2.NEWKEY
+ciphers: ["2.skip"（旧密钥密文，永久解不开）, "2.keep-rot"]
+```
+
+接口 200，用户无感知，`2.skip` 的数据永久丢失。
+
+### 路径 B（既有）
+
+ciphers / folders 都有「必须全量包含」的校验，**sends 没有**。
+一个旧版客户端不发 `accountData.sends`，轮换就返回 200，profile.key 换了但那些 Send 的 `akey` 还是旧的 → 客户端解不开。
+
+### 修法：所有校验前置，三个集合都要求全量
+
+```js
+// 1) 三个集合都取现有数据（sends 过滤掉 .bin，只要元数据）
+const curSends = ...;
+
+// 2) 完整性：少提交任何一个都 400
+if (reqCiphers.length !== curCiphers.length ||
+    reqFolders.length !== curFolders.length ||
+    reqSends.length   !== curSends.length) return 400;
+
+// 3) id 必须都属于自己
+// 4) folderId 归属全部预校验，任何一条不合法就整体 400（不再 continue）
+const rotFolderIdOf = new Map();
+for (const rc of reqCiphers) { ...校验... }
+// 5) 全部通过后才开始写
+```
+
+### 实测
+
+| 场景 | 结果 |
+|---|---|
+| 轮换带他人 folderId | **400**，cipher 名称仍是 `2.keep,2.skip`（未被改名） |
+| 拒绝后旧口令登录 | **200**（profile 未被换，没有半轮换） |
+| 轮换不带 sends | **400** |
+| 全量轮换 | **200**，cipher 全部改名、send 的 `akey` 更新为 `2.NEW-AKEY` |
+
+---
+
+## 十六、N-5：抗爆破被 N-4 削弱后的补充
+
+N-4 把「每条 Send 硬锁 5 次/15 分钟」换成「(IP, Send) 10 次/分钟」之后，
+跨 IP 的累计尝试失去了上限：30 个 IP 各打 1 次，全部被处理。
+
+补充一个**软上限**，兼顾两边：
+
+```js
+const SEND_PW_SOFT_CAP = 50;              // 单 Send 累计失败到 50
+const SEND_PW_COOLDOWN_DELAY_MS = 600;    // 之后错误口令每次多等 600ms
+
+// 正确口令走的是这条分支，完全不受影响
+if (await checkSendPassword(send, candidate)) { ...clear...; return { ok: true }; }
+
+// 到线后只拖慢错误口令
+if (fails >= SEND_PW_SOFT_CAP) { await sleep(600); return { ok:false, coolingDown:true, ... }; }
+```
+
+实测 30 个 IP × 2 次 = 60 次错口令，速率从 ~100 次/秒降到 **8.0 次/秒**，
+而软上限触发后另一个 IP 用正确口令仍然 **200**。
+
+> 为什么不直接硬锁：N-4 的教训就是硬锁会让第三方锁死他人的链接。
+> 软上限只作用于错误口令，接收方知道口令就永远进得去。
+
+
 
 
 
