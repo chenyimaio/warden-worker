@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "node src/dev.js",
     "build": "node scripts/build-makes.mjs",
+    "webvault": "node scripts/fetch-web-vault.mjs",
     "check": "node --check src/index.js && node --check src/store.js && node --check src/crypto.js && node --check src/upload.js && node --check src/mail.js && node --check src/makers.js",
     "smoke": "node scripts/smoke.mjs",
     "accept": "node scripts/acceptance.mjs",

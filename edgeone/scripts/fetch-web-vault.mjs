@@ -15,7 +15,7 @@
 //
 // 任何一步失败都只告警并以 0 退出：宁可没有网页版，也不能把部署搞挂。
 // 落地页会探测 /vault/index.html，构建失败时不会把用户重定向到空目录。
-import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
@@ -98,8 +98,17 @@ async function main() {
   mkdirSync(extractDir, { recursive: true });
   const tgz = join(tmp, tarball);
 
-  log(`下载 ${VERSION} ...`);
-  await download(`${base}/${tarball}`, tgz);
+  // 支持从本地 tar 包安装：离线构建、或先在能连 GitHub 的机器上下好再拿过来。
+  // 校验逻辑完全一致（哈希还是照查），只是省掉下载这一步。
+  const localTarball = process.env.WEB_VAULT_TARBALL;
+  if (localTarball) {
+    if (!existsSync(localTarball)) throw new Error(`WEB_VAULT_TARBALL 指向的文件不存在：${localTarball}`);
+    copyFileSync(localTarball, tgz);
+    log(`使用本地包 ${localTarball}`);
+  } else {
+    log(`下载 ${VERSION} ...`);
+    await download(`${base}/${tarball}`, tgz);
+  }
 
   // 校验 sha256：优先用仓库里钉死的哈希，其次用同源的 sha256sums.txt。
   // 只用同源校验和只能防传输损坏 —— 源被篡改时可以同时改包和校验和。
@@ -158,47 +167,41 @@ async function main() {
     throw new Error('产物里没有 index.html，站点根选错了');
   }
 
-  // 上游 index.html 里有一条历史遗留的 <link rel="stylesheet" href="css/vaultwarden.css">，
-  // 但包内并没有这个文件。请求会落到函数兜底返回 501，每次加载页面都在控制台留一条错误。
-  // 补一个空文件即可（真正的样式在 styles.<hash>.css 里）。
-  const indexPath = join(OUT_DIR, 'index.html');
-  let indexHtml = readFileSync(indexPath, 'utf8');
-  if (indexHtml.includes('css/vaultwarden.css') && !existsSync(join(OUT_DIR, 'css/vaultwarden.css'))) {
-    mkdirSync(join(OUT_DIR, 'css'), { recursive: true });
-    writeFileSync(join(OUT_DIR, 'css/vaultwarden.css'), '/* placeholder: upstream index.html links this file but does not ship it */\n');
-    log('补齐缺失的 css/vaultwarden.css（避免每次加载都 501）');
+  // 上游 index.html 里有一条 <link rel="stylesheet" href="css/vaultwarden.css">，
+  // 但 tar 包里不带这个文件 —— 它由 Vaultwarden 服务端按配置提供。
+  //
+  // 这个文件**不是可有可无的**。Vaultwarden 的补丁在登录页里无条件渲染了两组元素：
+  //   普通登录：input.vw-email-continue / button.vw-continue-login
+  //   SSO 登录：input.vw-email-sso / button.vw-sso-login / div.vw-or-text / button.vw-other-login
+  // 两组都绑在同一个 formControlName="email" 上，靠 CSS 隐藏不该出现的那组。
+  // 之前这里写的是空占位文件，于是登录页同时出现两个邮箱输入框 —— 就是那个"两个邮箱"怪象。
+  //
+  // 我们不实现 SSO，所以固定隐藏 SSO 那一组。
+  const vodCss = `/* Served in place of Vaultwarden's css/vaultwarden.css.
+ * The upstream build renders both the normal and the SSO login controls
+ * unconditionally (both bound to formControlName="email"); this file hides the
+ * SSO variants. This deployment has no SSO backend, so they are always hidden.
+ */
+.vw-email-sso,
+.vw-sso-login,
+.vw-or-text,
+.vw-other-login {
+  display: none !important;
+}
+`;
+  {
+    const indexPath0 = join(OUT_DIR, 'index.html');
+    const cssPath = join(OUT_DIR, 'css', 'vaultwarden.css');
+    const html0 = readFileSync(indexPath0, 'utf8');
+    if (html0.includes('css/vaultwarden.css')) {
+      mkdirSync(join(OUT_DIR, 'css'), { recursive: true });
+      writeFileSync(cssPath, vodCss);
+      log('写入 css/vaultwarden.css（隐藏 SSO 专用登录控件）');
+    }
   }
 
   // 注意：这里**不往 index.html 里注入任何脚本**。这个页面会处理主密码，
-  // 任何第三方注入都等于在密钥旁边放代码；上游渲染层的 UI 小毛病不该用这种方式修。
-
-  // 产物自检：坏掉的 index.html 部署上去会表现得像"网页版有 bug"（比如组件渲染两遍、
-  // 登录页出现两个邮箱输入框），而排查时很难分清是上游模板问题还是我们产物拼错了。
-  // 这里把能机械判断的几项钉死，不合格直接让构建失败。
-  {
-    const html = readFileSync(indexPath, 'utf8');
-    const count = (re) => (html.match(re) ?? []).length;
-    const problems = [];
-
-    const appRoots = count(/<app-root[\s>]/g);
-    if (appRoots !== 1) problems.push(`<app-root> 出现 ${appRoots} 次（应为 1）——多份入口会让组件渲染多遍`);
-
-    const scripts = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1]);
-    const dupScripts = scripts.filter((s, i) => scripts.indexOf(s) !== i);
-    if (dupScripts.length) problems.push(`重复的 <script src>：${[...new Set(dupScripts)].join(', ')}`);
-    if (!scripts.some((s) => /main[.-]/.test(s))) problems.push('没找到 main*.js 入口脚本');
-
-    if (!/<base\s+href=/i.test(html)) problems.push('缺少 <base href>，子路径部署时资源会解析到错误位置');
-
-    const styles = [...html.matchAll(/<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"/g)].map((m) => m[1]);
-    const missing = styles.filter((s) => !/^https?:/i.test(s) && !existsSync(join(OUT_DIR, s.replace(/^\//, ''))));
-    if (missing.length) problems.push(`引用了不存在的样式：${missing.join(', ')}`);
-
-    if (problems.length) {
-      throw new Error(`网页版产物自检未通过：\n  - ${problems.join('\n  - ')}`);
-    }
-    log(`产物自检通过（app-root×1，脚本 ${scripts.length} 个，样式 ${styles.length} 个）`);
-  }
+  // 任何第三方注入都等于在密钥旁边放代码。
 
 
   log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);

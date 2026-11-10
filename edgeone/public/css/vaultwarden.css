@@ -1,0 +1,11 @@
+/* Served in place of Vaultwarden's css/vaultwarden.css.
+ * The upstream build renders both the normal and the SSO login controls
+ * unconditionally (both bound to formControlName="email"); this file hides the
+ * SSO variants. This deployment has no SSO backend, so they are always hidden.
+ */
+.vw-email-sso,
+.vw-sso-login,
+.vw-or-text,
+.vw-other-login {
+  display: none !important;
+}
