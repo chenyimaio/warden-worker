@@ -2,7 +2,8 @@
 // 与 warden-worker（Rust）对齐的最小密码学集合：
 //  - 服务端对 masterPasswordHash 再做一层 PBKDF2-SHA256（与 Rust crypto.rs 同思路）
 //  - 访问/刷新令牌：HS256 JWT，claims 形状对齐 Rust auth::Claims
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, pbkdf2, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import { SignJWT, jwtVerify } from 'jose';
 
 export const KDF_PBKDF2 = 0;
@@ -19,13 +20,18 @@ export function randomB64(bytes = 16) {
   return randomBytes(bytes).toString('base64');
 }
 
-export function hashPassword(masterPasswordHash, salt, iterations) {
-  return pbkdf2Sync(masterPasswordHash, salt, iterations, 32, 'sha256').toString('base64');
+// 600k 次 PBKDF2 在同步版本里会阻塞整个事件循环（登录并发一高，所有请求一起卡）。
+// 用线程池版本：语义不变，但不再卡住其它请求。
+const pbkdf2Async = promisify(pbkdf2);
+
+export async function hashPassword(masterPasswordHash, salt, iterations) {
+  const buf = await pbkdf2Async(masterPasswordHash, salt, iterations, 32, 'sha256');
+  return buf.toString('base64');
 }
 
-export function verifyPassword(storedHash, salt, iterations, candidate) {
+export async function verifyPassword(storedHash, salt, iterations, candidate) {
   const a = Buffer.from(storedHash, 'base64');
-  const b = Buffer.from(hashPassword(candidate, salt, iterations), 'base64');
+  const b = Buffer.from(await hashPassword(candidate, salt, iterations), 'base64');
   return a.length === b.length && timingSafeEqual(a, b);
 }
 

@@ -43,7 +43,7 @@ const corsOptions = {
   origin: (origin, c) => {
     if (!origin) return undefined; // 非浏览器请求（手机客户端、curl）
     const base = String(envGet(c, 'BASE_URL', '')).replace(/\/+$/, '');
-    if (!base) return origin; // 没配 BASE_URL 时保持旧行为，不阻塞部署
+    if (!base) return undefined; // 没配 BASE_URL 就不下发 ACAO，绝不反射任意源
     const alt = base.replace(/^https:/i, 'http:');
     return origin === base || origin === alt ? origin : undefined;
   },
@@ -51,6 +51,31 @@ const corsOptions = {
   allowHeaders: ['authorization', 'content-type', 'device-type', 'x-device-type', 'x-requested-with'],
   maxAge: 600,
 };
+
+// 客户端传进来的 id 会直接拼进存储键（u/{uid}/ciphers/{id}.json）。对象键是字面量、
+// 不会真的路径穿越，但 %2F、反斜杠、.. 能让键落到意想之外的位置，一律在入口拒绝。
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const validId = (v) => v == null || v === '' || ID_RE.test(String(v));
+
+// 单个 JSON 请求体上限：平台给到 ~6 MB，但业务 JSON 没理由这么大，
+// 留 4 MiB 既够导入，又能挡住"一个字段 4 MB"的滥用。
+const BODY_MAX_BYTES = 4 * 1024 * 1024;
+
+app.use('*', async (c, next) => {
+  const rawPath = new URL(c.req.url).pathname.toLowerCase();
+  if (rawPath.includes('%2f') || rawPath.includes('%5c') || rawPath.includes('..')) {
+    return c.json({ error: 'invalid path' }, 400);
+  }
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
+    const len = Number(c.req.header('content-length') ?? 0);
+    const ct = (c.req.header('content-type') || '').toLowerCase();
+    const binary = ct.includes('application/octet-stream') || ct.includes('multipart/form-data');
+    if (!binary && len > BODY_MAX_BYTES) {
+      return c.json({ error: 'payload too large', limit: BODY_MAX_BYTES }, 413);
+    }
+  }
+  await next();
+});
 
 // 安全响应头：下载 URL 里带票据，Referer 一律不带出去；同时禁止 MIME 嗅探
 app.use('*', async (c, next) => {
@@ -426,6 +451,9 @@ app.get('/api/web-status', (c) =>
 
 // ---------------------------------------------------------------- accounts
 const prelogin = async (c) => {
+  // 这个接口会回答「该邮箱的 KDF 参数」，不同参数就等于告诉调用方账号是否存在；限流抬高枚举成本
+  const rl = await limit(c, 'prelogin', requestIp(c), 30, 60);
+  if (rl) return rl;
   const { email } = await body(c);
   const user = email ? await findUserByEmail(c, email) : null;
   const kdf = user?.kdfType ?? 0;
@@ -499,7 +527,7 @@ async function register(c) {
     email,
     name: p.name ?? null,
     emailVerified: false,
-    masterPasswordHash: hashPassword(masterPasswordHash, salt, iterations),
+    masterPasswordHash: await hashPassword(masterPasswordHash, salt, iterations),
     passwordSalt: salt,
     passwordIterations: iterations,
     ...hintFieldsFrom(readHint(p)),
@@ -1428,11 +1456,13 @@ app.post('/api/accounts/password', async (c) => {
           }
         : {};
 
+  // mutate 的回调是同步的：哈希必须先算好
+  const newHashPwd = await hashPassword(newMph, salt, iterations);
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
           ...cur,
-          masterPasswordHash: hashPassword(newMph, salt, iterations),
+          masterPasswordHash: newHashPwd,
           passwordSalt: salt,
           passwordIterations: iterations,
           key: newKey ?? cur.key,
@@ -1493,11 +1523,14 @@ app.post('/api/accounts/kdf', async (c) => {
   const newMph = String(authData.masterPasswordAuthenticationHash ?? '');
   if (!newMph) return c.json({ error: 'Missing masterPasswordAuthenticationHash' }, 400);
   const stamp = newId();
+  // mutate 的回调是同步的：哈希必须先算好
+  const newHashKdf = await hashPassword(newMph, salt, newIterations);
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
           ...cur,
-          masterPasswordHash: hashPassword(newMph, salt, newIterations),
+          masterPasswordHash: newHashKdf,
+
           passwordSalt: salt,
           passwordIterations: newIterations,
           key: unlockData.masterKeyWrappedUserKey ?? cur.key,
@@ -1529,6 +1562,9 @@ app.post('/api/accounts/security-stamp', async (c) => {
 
 // ---------------------------------------------------------------- devices
 app.get('/api/devices/knowndevice', async (c) => {
+  // 这个接口会回答「该邮箱下有没有这台设备」，可用来枚举账号/设备，加限流
+  const rl = await limit(c, 'knowndevice', requestIp(c), 30, 60);
+  if (rl) return rl;
   const encoded = c.req.header('x-request-email') || '';
   const id = c.req.header('x-device-identifier') || '';
   if (!encoded || !id) return c.json(false);
@@ -1778,6 +1814,7 @@ app.get('/api/ciphers/:id/attachment/:aid/download', async (c) => {
 // 2-segment token = attachment-scoped; 3-segment = user access token
 let uid;
   let aid;
+  let claimsStamp = null;
   if (token.split('.').length === 2) {
     const att = verifyAttachmentToken(c.env, token);
     if (!att) return c.json({ error: 'invalid attachment token' }, 401);
@@ -1788,12 +1825,23 @@ let uid;
       const claims = await verifyAccess(c.env, token);
       uid = claims.sub;
       aid = c.req.param('aid');
+      claimsStamp = claims.sstamp ?? null;
     } catch {
       return c.json({ error: 'unauthorized' }, 401);
     }
   }
 
   const store = getStore(c.env);
+
+  // 用 access token 下载时同样要过 securityStamp：否则改密/踢设备/轮换之后
+  // /api/sync 已经 401，旧 token 却还能把附件整个拉走。
+  if (claimsStamp !== null || token.split('.').length !== 2) {
+    const prof = (await store.get(keys.profile(uid)))?.value;
+    if (!prof || !safeEqual(prof.securityStamp, claimsStamp)) {
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+  }
+
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param('id')) return c.json({ error: 'not found' }, 404);
 
@@ -1894,7 +1942,8 @@ function sendToJson(s) {
     deletionDate: s.deletionDate,
     disabled: Boolean(s.disabled),
     hideEmail: Boolean(s.hideEmail),
-    password: s.passwordHash ?? null,
+    // 不回传口令哈希：规格里这个字段恒为 null，客户端靠 authType 判断是否带口令
+    password: null,
     authType: sendHasPassword(s) ? 1 : 0,
     object: 'send',
   };
@@ -1970,6 +2019,8 @@ async function createTextSend(c) {
   if (dates.error) return c.json({ error: dates.error }, dates.status);
 
   const now = nowIso();
+  // id 会进存储键，客户端自报的 id 必须是安全字符
+  if (!validId(p.id)) return c.json({ error: 'invalid id' }, 400);
   const id = String(p.id ?? newId());
   const send = {
     id,
@@ -2151,7 +2202,10 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   if (token) {
     try {
       const payload = await verifyAccess(c.env, token);
-      if (payload?.sid != null) {
+      // 必须限定用途：上传票据（api.send.upload）同样带 sid，不校验 scope 的话
+      // 拿它就能换到带密码 Send 的下载地址，密码门直接失效。
+      const scoped = Array.isArray(payload?.scope) && payload.scope.includes('api.send.access');
+      if (scoped && payload?.sid != null) {
         const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
         if (idx) {
           send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
@@ -2258,6 +2312,8 @@ app.post('/api/sends/file/v2', async (c) => {
   if (dates.error) return c.json({ error: dates.error }, dates.status);
 
   const now = nowIso();
+  // id 会进存储键，客户端自报的 id 必须是安全字符
+  if (!validId(p.id)) return c.json({ error: 'invalid id' }, 400);
   const id = String(p.id ?? newId());
   const fileName = String(p.file?.fileName ?? p.fileName ?? 'file');
   const size = Number(p.fileLength ?? p.file?.size ?? 0) || 0;
@@ -2282,16 +2338,12 @@ app.post('/api/sends/file/v2', async (c) => {
     ...sendPasswordHash(p.password),
   };
 
-  const store = getStore(c.env);
-  await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: '*' });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
-  await touchUser(store, a.claims.sub);
-
   // 平台对**请求体和响应体**都有约 6 MB 的限制（实测 8.95 MB 的下载直接返回 413），
   // 所以即使靠直传把大文件传上去，下载也下不来 —— 干脆在创建时就说清楚。
+  // 注意必须放在落库**之前**：先写再拒会留下孤儿记录，可以被无限制造。
   const functionMax = Number(envGet(c, 'UPLOAD_MAX_BYTES', 6 * 1024 * 1024)) || 0;
   if (functionMax && size > functionMax) {
-    console.warn('[send] create rejected, too large', { id, size, functionMax });
+    console.warn('[send] create rejected, too large', { size, functionMax });
     return c.json(
       {
         error: `File too large: this deployment accepts files up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
@@ -2300,6 +2352,11 @@ app.post('/api/sends/file/v2', async (c) => {
       413,
     );
   }
+
+  const store = getStore(c.env);
+  await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: '*' });
+  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
+  await touchUser(store, a.claims.sub);
 
   // 回退：客户端 PUT 到本函数（受平台 ~6MB 请求体限制）
   const uploadToken = await signAccess(c.env, {
@@ -2437,6 +2494,11 @@ app.post('/api/sends/:id/file/:fileId', uploadSendFile);
 app.put('/api/sends/:id/file/:fileId', uploadSendFile);
 
 app.post('/api/sends/:id/access/file/:fileId', async (c) => {
+  // 旧通道，和 /sends/access/file/:fileId 同样的规则：限流 + 计数 + 用途校验，
+  // 否则这里就成了绕过限额和暴力试口令的后门。
+  const rl = await limit(c, 'send-access-legacy', requestIp(c), 30, 60);
+  if (rl) return rl;
+
   const p = await body(c);
   const auth = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i);
   const token = p.token ?? (auth ? auth[1] : '');
@@ -2450,6 +2512,8 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
     } catch {
       return c.json({ error: 'invalid access token' }, 401);
     }
+    const scoped = Array.isArray(payload?.scope) && payload.scope.includes('api.send.access');
+    if (!scoped) return c.json({ error: 'invalid access token' }, 401);
     const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
     if (!idx) return c.json({ error: 'Send is not accessible' }, 404);
     send = (await store.get(keys.send(idx.userId, idx.id)))?.value;
@@ -2462,6 +2526,14 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send) && !checkSendPassword(send, p.password ?? null)) {
     return c.json({ error: 'Invalid password' }, 401);
+  }
+
+  try {
+    await mutate(store, keys.send(send.userId, send.id), (cur) =>
+      cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : undefined,
+    );
+  } catch (e) {
+    console.warn('[send-access] accessCount update failed (ignored)', e?.message || e);
   }
 
   const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
@@ -2579,11 +2651,13 @@ const salt = randomB64();
   const iterations = pbkdf2Iterations(c);
   const newMph = rotationMph;
   const stamp = newId();
+  // mutate 的回调是同步的：哈希必须先算好
+  const newHashPwd = await hashPassword(newMph, salt, iterations);
   await mutate(store, keys.profile(a.claims.sub), (cur) =>
     cur
       ? {
           ...cur,
-          masterPasswordHash: hashPassword(newMph, salt, iterations),
+          masterPasswordHash: newHashPwd,
           passwordSalt: salt,
           passwordIterations: iterations,
           key: unlock.masterKeyEncryptedUserKey ?? unlock.masterKeyWrappedUserKey ?? cur.key,
@@ -2690,6 +2764,9 @@ function authRequestToJson(ar, origin) {
 }
 
 app.post('/api/auth-requests', async (c) => {
+  // 这个接口不需要登录就能写存储：必须限流，否则可以被用来刷存储、刷受害者的待批准列表
+  const rl = await limit(c, 'auth-request', requestIp(c), 10, 60);
+  if (rl) return rl;
   const p = await body(c);
   const store = getStore(c.env);
   const email = String(p.email ?? '').toLowerCase();
@@ -2700,6 +2777,12 @@ app.post('/api/auth-requests', async (c) => {
   const devType = requestDeviceType(c);
   if (!device || Number(device.type) !== devType) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
+  }
+
+  // 待批准列表要有上限：否则这个免登录接口能一直往受害者列表里塞记录
+  const pending = await store.list(keys.authRequests(user.id));
+  if (pending.length >= 20) {
+    return c.json({ error: 'Too many pending auth requests', statusCode: 429 }, 429);
   }
 
   const ar = {

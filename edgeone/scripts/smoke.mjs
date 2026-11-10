@@ -770,6 +770,7 @@ r = await call('POST', '/api/sends/file/v2', {
   },
 });
 const secSend = r.data?.sendResponse ?? {};
+const secUploadUrl = r.data?.url ?? '';
 const secId = secSend.id;
 const secAccessId = secSend.accessId;
 await call('POST', `/api/sends/${secId}/file/${secId}`, { token: secAccess, raw: Buffer.from('hidden') });
@@ -836,6 +837,69 @@ r = await call('POST', '/identity/connect/token', {
   },
 });
 check('新密码可以登录（旧密码结构没被误写成新密码）', r.status === 200 && !!r.data?.access_token, r);
+
+// 29. 安全回归（第二轮审计）：用途隔离 / securityStamp / 孤儿记录
+// 上传票据（api.send.upload）不能换成下载地址
+{
+  const secUpToken = decodeURIComponent(((secUploadUrl ?? '').split('token=')[1] ?? ''));
+  r = await call('POST', `/api/sends/access/file/${secAccessId}`, { token: secUpToken });
+  check('上传票据不能换下载地址 -> 401', !secUpToken || r.status === 401, r);
+}
+
+// 改密后旧 access token 不能再下载附件
+{
+  const email3 = `att-${Date.now()}@example.com`;
+  const mph3 = 'att-mph';
+  await call('POST', '/api/accounts/register', {
+    body: {
+      email: email3,
+      masterPasswordHash: mph3,
+      userSymmetricKey: '2.k|iv|ct',
+      userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' },
+      kdf: 0,
+      kdfIterations: 100000,
+    },
+  });
+  const tok3 = (await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: email3, password: mph3, scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'att-dev', deviceName: 'att',
+    },
+  })).data?.access_token;
+  r = await call('POST', '/api/ciphers', { token: tok3, body: { type: 2, name: '2.n', notes: '2.no', secureNote: { type: 0 } } });
+  const cid3 = r.data?.id;
+  r = await call('POST', `/api/ciphers/${cid3}/attachment/v2`, { token: tok3, body: { key: '2.ak', fileName: 'a.bin', fileSize: 4 } });
+  const aid3 = r.data?.attachmentId;
+  await call('POST', `/api/ciphers/${cid3}/attachment/${aid3}`, { token: tok3, raw: Buffer.from('DATA') });
+  const okBefore = await call('GET', `/api/ciphers/${cid3}/attachment/${aid3}/download`, { token: tok3 });
+  check('改密前附件可下载', okBefore.status === 200, okBefore);
+  await call('POST', '/api/accounts/password', {
+    token: tok3,
+    body: { masterPasswordHash: mph3, newMasterPasswordHash: 'att-mph-2', key: '2.k2|iv|ct' },
+  });
+  const syncAfter = await call('GET', '/api/sync', { token: tok3 });
+  check('改密后 /api/sync -> 401', syncAfter.status === 401, syncAfter);
+  const attAfter = await call('GET', `/api/ciphers/${cid3}/attachment/${aid3}/download`, { token: tok3 });
+  check('改密后旧 token 下载附件 -> 401', attAfter.status === 401, attAfter);
+}
+
+// 超限文件 Send 不应落库（否则孤儿记录可无限制造）
+// 上一节改过密码，这里用新密码重新登录拿新 token
+{
+  const tok4 = (await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: secEmail, password: 'sec-mph-2', scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'sec-dev-3', deviceName: 'sec',
+    },
+  })).data?.access_token;
+  r = await call('POST', '/api/sends/file/v2', {
+    token: tok4,
+    body: { type: 1, key: 'k', name: 'too-big', file: { fileName: 'b.bin' }, fileLength: 9 * 1024 * 1024, deletionDate: del },
+  });
+  check('9 MiB 文件 Send -> 413', r.status === 413, r);
+  const after = await call('GET', '/api/sends', { token: tok4 });
+  check('超限 Send 没有留下记录', !(after.data?.data ?? []).some((x) => x.name === 'too-big'), after);
+}
 
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

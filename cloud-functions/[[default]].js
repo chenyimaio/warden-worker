@@ -13330,10 +13330,11 @@ var cors = (options) => {
 };
 
 // src/index.js
-import { createHash as createHash2, pbkdf2Sync as pbkdf2Sync2, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash2, pbkdf2Sync, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 
 // src/crypto.js
-import { createCipheriv, createDecipheriv, createHash, createHmac as createHmac2, randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac as createHmac2, randomBytes, randomUUID, pbkdf2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { promisify as promisify3 } from "node:util";
 
 // node_modules/jose/dist/node/esm/runtime/base64url.js
 import { Buffer as Buffer2 } from "node:buffer";
@@ -14541,12 +14542,14 @@ var emailKey = (email) => createHash("sha256").update(email.trim().toLowerCase()
 function randomB64(bytes = 16) {
   return randomBytes(bytes).toString("base64");
 }
-function hashPassword(masterPasswordHash, salt, iterations) {
-  return pbkdf2Sync(masterPasswordHash, salt, iterations, 32, "sha256").toString("base64");
+var pbkdf2Async = promisify3(pbkdf2);
+async function hashPassword(masterPasswordHash, salt, iterations) {
+  const buf = await pbkdf2Async(masterPasswordHash, salt, iterations, 32, "sha256");
+  return buf.toString("base64");
 }
-function verifyPassword(storedHash, salt, iterations, candidate) {
+async function verifyPassword(storedHash, salt, iterations, candidate) {
   const a = Buffer.from(storedHash, "base64");
-  const b = Buffer.from(hashPassword(candidate, salt, iterations), "base64");
+  const b = Buffer.from(await hashPassword(candidate, salt, iterations), "base64");
   return a.length === b.length && timingSafeEqual2(a, b);
 }
 var REFRESH_SECRET_LABEL = "warden/v1/refresh-token-signing-key";
@@ -15084,7 +15087,7 @@ var corsOptions = {
   origin: (origin, c) => {
     if (!origin) return void 0;
     const base = String(envGet(c, "BASE_URL", "")).replace(/\/+$/, "");
-    if (!base) return origin;
+    if (!base) return void 0;
     const alt = base.replace(/^https:/i, "http:");
     return origin === base || origin === alt ? origin : void 0;
   },
@@ -15092,6 +15095,24 @@ var corsOptions = {
   allowHeaders: ["authorization", "content-type", "device-type", "x-device-type", "x-requested-with"],
   maxAge: 600
 };
+var ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+var validId = (v) => v == null || v === "" || ID_RE.test(String(v));
+var BODY_MAX_BYTES = 4 * 1024 * 1024;
+app.use("*", async (c, next) => {
+  const rawPath = new URL(c.req.url).pathname.toLowerCase();
+  if (rawPath.includes("%2f") || rawPath.includes("%5c") || rawPath.includes("..")) {
+    return c.json({ error: "invalid path" }, 400);
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
+    const len = Number(c.req.header("content-length") ?? 0);
+    const ct = (c.req.header("content-type") || "").toLowerCase();
+    const binary = ct.includes("application/octet-stream") || ct.includes("multipart/form-data");
+    if (!binary && len > BODY_MAX_BYTES) {
+      return c.json({ error: "payload too large", limit: BODY_MAX_BYTES }, 413);
+    }
+  }
+  await next();
+});
 app.use("*", async (c, next) => {
   await next();
   c.header("referrer-policy", "no-referrer");
@@ -15408,6 +15429,8 @@ app.get(
   })
 );
 var prelogin = async (c) => {
+  const rl = await limit(c, "prelogin", requestIp(c), 30, 60);
+  if (rl) return rl;
   const { email } = await body(c);
   const user = email ? await findUserByEmail(c, email) : null;
   const kdf = user?.kdfType ?? 0;
@@ -15459,7 +15482,7 @@ async function register(c) {
     email,
     name: p.name ?? null,
     emailVerified: false,
-    masterPasswordHash: hashPassword(masterPasswordHash, salt, iterations),
+    masterPasswordHash: await hashPassword(masterPasswordHash, salt, iterations),
     passwordSalt: salt,
     passwordIterations: iterations,
     ...hintFieldsFrom(readHint(p)),
@@ -16258,12 +16281,13 @@ app.post("/api/accounts/password", async (c) => {
     kdfMemory: kdf.memory ?? null,
     kdfParallelism: kdf.parallelism ?? null
   } : {};
+  const newHashPwd = await hashPassword(newMph, salt, iterations);
   await mutate(
     store,
     keys.profile(a.claims.sub),
     (cur) => cur ? {
       ...cur,
-      masterPasswordHash: hashPassword(newMph, salt, iterations),
+      masterPasswordHash: newHashPwd,
       passwordSalt: salt,
       passwordIterations: iterations,
       key: newKey ?? cur.key,
@@ -16316,12 +16340,13 @@ app.post("/api/accounts/kdf", async (c) => {
   const newMph = String(authData.masterPasswordAuthenticationHash ?? "");
   if (!newMph) return c.json({ error: "Missing masterPasswordAuthenticationHash" }, 400);
   const stamp = newId();
+  const newHashKdf = await hashPassword(newMph, salt, newIterations);
   await mutate(
     store,
     keys.profile(a.claims.sub),
     (cur) => cur ? {
       ...cur,
-      masterPasswordHash: hashPassword(newMph, salt, newIterations),
+      masterPasswordHash: newHashKdf,
       passwordSalt: salt,
       passwordIterations: newIterations,
       key: unlockData.masterKeyWrappedUserKey ?? cur.key,
@@ -16348,6 +16373,8 @@ app.post("/api/accounts/security-stamp", async (c) => {
   return c.json({});
 });
 app.get("/api/devices/knowndevice", async (c) => {
+  const rl = await limit(c, "knowndevice", requestIp(c), 30, 60);
+  if (rl) return rl;
   const encoded = c.req.header("x-request-email") || "";
   const id = c.req.header("x-device-identifier") || "";
   if (!encoded || !id) return c.json(false);
@@ -16552,6 +16579,7 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
   if (!token) return c.json({ error: "unauthorized" }, 401);
   let uid;
   let aid;
+  let claimsStamp = null;
   if (token.split(".").length === 2) {
     const att = verifyAttachmentToken(c.env, token);
     if (!att) return c.json({ error: "invalid attachment token" }, 401);
@@ -16562,11 +16590,18 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
       const claims = await verifyAccess(c.env, token);
       uid = claims.sub;
       aid = c.req.param("aid");
+      claimsStamp = claims.sstamp ?? null;
     } catch {
       return c.json({ error: "unauthorized" }, 401);
     }
   }
   const store = getStore2(c.env);
+  if (claimsStamp !== null || token.split(".").length !== 2) {
+    const prof = (await store.get(keys.profile(uid)))?.value;
+    if (!prof || !safeEqual(prof.securityStamp, claimsStamp)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+  }
   const meta = (await store.get(keys.attachmentMeta(uid, aid)))?.value;
   if (!meta || meta.cipherId !== c.req.param("id")) return c.json({ error: "not found" }, 404);
   if (token.split(".").length === 2 && !await consumeToken(store, token, { maxUses: 5, ttlSec: 900 })) {
@@ -16601,7 +16636,7 @@ var SEND_FILE = 1;
 var SEND_PASSWORD_ITER = 1e5;
 var accessIdFromUuid = (id) => Buffer.from(String(id).replace(/-/g, ""), "hex").toString("base64url");
 function pbkdf2B64url(value, saltB64, iterations) {
-  return pbkdf2Sync2(String(value), Buffer.from(saltB64, "base64url"), iterations, 32, "sha256").toString(
+  return pbkdf2Sync(String(value), Buffer.from(saltB64, "base64url"), iterations, 32, "sha256").toString(
     "base64url"
   );
 }
@@ -16654,7 +16689,8 @@ function sendToJson(s) {
     deletionDate: s.deletionDate,
     disabled: Boolean(s.disabled),
     hideEmail: Boolean(s.hideEmail),
-    password: s.passwordHash ?? null,
+    // 不回传口令哈希：规格里这个字段恒为 null，客户端靠 authType 判断是否带口令
+    password: null,
     authType: sendHasPassword(s) ? 1 : 0,
     object: "send"
   };
@@ -16720,6 +16756,7 @@ async function createTextSend(c) {
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
   const now = nowIso();
+  if (!validId(p.id)) return c.json({ error: "invalid id" }, 400);
   const id = String(p.id ?? newId());
   const send = {
     id,
@@ -16880,7 +16917,8 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (token) {
     try {
       const payload = await verifyAccess(c.env, token);
-      if (payload?.sid != null) {
+      const scoped = Array.isArray(payload?.scope) && payload.scope.includes("api.send.access");
+      if (scoped && payload?.sid != null) {
         const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
         if (idx) {
           send = (await store.get(keys.send(idx.userId, idx.id)))?.value ?? null;
@@ -16963,6 +17001,7 @@ app.post("/api/sends/file/v2", async (c) => {
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
   const now = nowIso();
+  if (!validId(p.id)) return c.json({ error: "invalid id" }, 400);
   const id = String(p.id ?? newId());
   const fileName = String(p.file?.fileName ?? p.fileName ?? "file");
   const size = Number(p.fileLength ?? p.file?.size ?? 0) || 0;
@@ -16986,13 +17025,9 @@ app.post("/api/sends/file/v2", async (c) => {
     hideEmail: Boolean(p.hideEmail),
     ...sendPasswordHash(p.password)
   };
-  const store = getStore2(c.env);
-  await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
-  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
-  await touchUser(store, a.claims.sub);
   const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   if (functionMax && size > functionMax) {
-    console.warn("[send] create rejected, too large", { id, size, functionMax });
+    console.warn("[send] create rejected, too large", { size, functionMax });
     return c.json(
       {
         error: `File too large: this deployment accepts files up to ${(functionMax / 1024 / 1024).toFixed(1)} MB (platform request/response body limit)`,
@@ -17001,6 +17036,10 @@ app.post("/api/sends/file/v2", async (c) => {
       413
     );
   }
+  const store = getStore2(c.env);
+  await store.put(keys.send(a.claims.sub, id), send, { ifNoneMatch: "*" });
+  await store.put(keys.sendIndex(accessIdFromUuid(id)), { userId: a.claims.sub, id });
+  await touchUser(store, a.claims.sub);
   const uploadToken = await signAccess(c.env, {
     sub: "send-upload",
     sid: accessIdFromUuid(id),
@@ -17103,6 +17142,8 @@ async function uploadSendFile(c) {
 app.post("/api/sends/:id/file/:fileId", uploadSendFile);
 app.put("/api/sends/:id/file/:fileId", uploadSendFile);
 app.post("/api/sends/:id/access/file/:fileId", async (c) => {
+  const rl = await limit(c, "send-access-legacy", requestIp(c), 30, 60);
+  if (rl) return rl;
   const p = await body(c);
   const auth = (c.req.header("authorization") || "").match(/^Bearer\s+(.+)$/i);
   const token = p.token ?? (auth ? auth[1] : "");
@@ -17115,6 +17156,8 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
     } catch {
       return c.json({ error: "invalid access token" }, 401);
     }
+    const scoped = Array.isArray(payload?.scope) && payload.scope.includes("api.send.access");
+    if (!scoped) return c.json({ error: "invalid access token" }, 401);
     const idx = (await store.get(keys.sendIndex(String(payload.sid))))?.value;
     if (!idx) return c.json({ error: "Send is not accessible" }, 404);
     send = (await store.get(keys.send(idx.userId, idx.id)))?.value;
@@ -17126,6 +17169,15 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send) && !checkSendPassword(send, p.password ?? null)) {
     return c.json({ error: "Invalid password" }, 401);
+  }
+  try {
+    await mutate(
+      store,
+      keys.send(send.userId, send.id),
+      (cur) => cur ? { ...cur, accessCount: Number(cur.accessCount ?? 0) + 1 } : void 0
+    );
+  } catch (e) {
+    console.warn("[send-access] accessCount update failed (ignored)", e?.message || e);
   }
   const res = await streamBinary(c, store, keys.sendFile(send.userId, send.id));
   return res ?? c.json({ error: "file not found" }, 404);
@@ -17224,12 +17276,13 @@ app.post("/api/accounts/key-management/rotate-user-account-keys", async (c) => {
   const iterations = pbkdf2Iterations(c);
   const newMph = rotationMph;
   const stamp = newId();
+  const newHashPwd = await hashPassword(newMph, salt, iterations);
   await mutate(
     store,
     keys.profile(a.claims.sub),
     (cur) => cur ? {
       ...cur,
-      masterPasswordHash: hashPassword(newMph, salt, iterations),
+      masterPasswordHash: newHashPwd,
       passwordSalt: salt,
       passwordIterations: iterations,
       key: unlock.masterKeyEncryptedUserKey ?? unlock.masterKeyWrappedUserKey ?? cur.key,
@@ -17316,6 +17369,8 @@ function authRequestToJson(ar, origin) {
   };
 }
 app.post("/api/auth-requests", async (c) => {
+  const rl = await limit(c, "auth-request", requestIp(c), 10, 60);
+  if (rl) return rl;
   const p = await body(c);
   const store = getStore2(c.env);
   const email = String(p.email ?? "").toLowerCase();
@@ -17325,6 +17380,10 @@ app.post("/api/auth-requests", async (c) => {
   const devType = requestDeviceType(c);
   if (!device || Number(device.type) !== devType) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
+  }
+  const pending = await store.list(keys.authRequests(user.id));
+  if (pending.length >= 20) {
+    return c.json({ error: "Too many pending auth requests", statusCode: 429 }, 429);
   }
   const ar = {
     id: newId(),
