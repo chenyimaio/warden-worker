@@ -13330,7 +13330,8 @@ var cors = (options) => {
 };
 
 // src/index.js
-import { createHash as createHash2, pbkdf2Sync, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash2, pbkdf2 as pbkdf22, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { promisify as promisify4 } from "node:util";
 
 // src/crypto.js
 import { createCipheriv, createDecipheriv, createHash, createHmac as createHmac2, randomBytes, randomUUID, pbkdf2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -15081,6 +15082,7 @@ async function readUpload(c) {
 }
 
 // src/index.js
+var pbkdf2Async2 = promisify4(pbkdf22);
 var app = new Hono3();
 var envGet = (c, name, dflt) => c.env?.[name] ?? process.env[name] ?? dflt;
 var corsOptions = {
@@ -15133,6 +15135,7 @@ app.use("*", async (c, next) => {
 app.use("*", cors(corsOptions));
 var BULK_MAX_IDS = 2e3;
 var IMPORT_MAX_ITEMS = 5e3;
+var EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 async function consumeToken(store, token, { maxUses = 5, ttlSec = 900 } = {}) {
   const id = createHash2("sha256").update(String(token)).digest("hex").slice(0, 32);
   const key = `tok/${id}.json`;
@@ -15239,15 +15242,31 @@ async function sweepRateKeys(store, now) {
 var SHARED_RATE_BUCKET = "shared-untrusted-ip";
 var SHARED_RATE_FACTOR = 10;
 var SHARED_RATE_MIN = 120;
-function rateBucket(id, max) {
+var SHARED_STRICT_FLOOR = 600;
+var SHARED_STRICT_KINDS = /* @__PURE__ */ new Set([
+  "login-ip",
+  "register",
+  "register-email",
+  "prelogin",
+  "hint-ip",
+  "verify-password",
+  "knowndevice",
+  "send-access",
+  "send-access-legacy",
+  "auth-request",
+  "auth-request-response",
+  "auth-request-approve"
+]);
+function rateBucket(id, max, kind = "") {
   if (id != null && id !== "") return { id, max };
-  return {
-    id: SHARED_RATE_BUCKET,
-    max: Math.max(Number(max || 0) * SHARED_RATE_FACTOR, SHARED_RATE_MIN)
-  };
+  const base = Number(max || 0);
+  if (SHARED_STRICT_KINDS.has(kind)) {
+    return { id: SHARED_RATE_BUCKET, max: Math.max(base, SHARED_STRICT_FLOOR) };
+  }
+  return { id: SHARED_RATE_BUCKET, max: Math.max(base * SHARED_RATE_FACTOR, SHARED_RATE_MIN) };
 }
 async function limit(c, kind, id, max, windowSec) {
-  const bucket = rateBucket(id, max);
+  const bucket = rateBucket(id, max, kind);
   const store = getStore2(c.env);
   const digest = createHash2("sha256").update(`${kind}:${bucket.id}`).digest("hex").slice(0, 32);
   const key = keys.rate(`${kind}/${digest}`);
@@ -15268,7 +15287,7 @@ async function limit(c, kind, id, max, windowSec) {
 }
 async function limits(c, specs) {
   const usable = specs.map((s) => {
-    const b = rateBucket(s.id, s.max);
+    const b = rateBucket(s.id, s.max, s.kind);
     return { ...s, id: b.id, max: b.max };
   });
   const store = getStore2(c.env);
@@ -15530,7 +15549,9 @@ async function register(c) {
   const email = String(p.email ?? "").trim().toLowerCase();
   const rl = await limit(c, "register", requestIp(c), 10, 60);
   if (rl) return rl;
-  if (!email) return c.json({ error: "invalid email" }, 400);
+  if (!email || !EMAIL_RE.test(email) || email.length > 254) {
+    return c.json({ error: "invalid email" }, 400);
+  }
   const rlEmail = await limit(c, "register-email", email, 5, 60);
   if (rlEmail) return rlEmail;
   if (!allowedEmail(c, email)) return c.json({ error: "Not allowed to signup" }, 401);
@@ -15668,10 +15689,10 @@ app.post("/identity/connect/token", async (c) => {
           const { payload } = await verifyRemember(c.env, code);
           if (payload.sub !== deviceId || payload.uid !== user.id) throw new Error("remember mismatch");
           const dev = await store.get(keys.device(user.id, deviceId));
-          if (!dev || dev.value.twofactorRemember !== code) throw new Error("remember mismatch");
+          if (!dev || !safeEqual(dev.value.twofactorRemember, code)) throw new Error("remember mismatch");
         } else if (provider === TFA_RECOVERY) {
           const stored = String(openSecret(c.env, user.totpRecover) ?? "");
-          if (!stored || stored.toUpperCase() !== code.trim().toUpperCase()) {
+          if (!stored || !safeEqual(stored.toUpperCase(), code.trim().toUpperCase())) {
             return c.json({ error: "Recovery code is incorrect" }, 400);
           }
           await delTwoFactor(store, user.id, TFA_AUTHENTICATOR);
@@ -15772,7 +15793,7 @@ app.post("/identity/connect/token", async (c) => {
       }));
       return c.json({ error: "invalid_grant", send_access_error_type: "unavailable" }, 400);
     }
-    if (sendHasPassword(send) && !checkSendPassword(send, provided)) {
+    if (sendHasPassword(send) && !(await verifySendPassword(store2, send, provided)).ok) {
       console.warn("[send-access] password required/invalid");
       return c.json(
         {
@@ -15945,11 +15966,18 @@ app.get("/api/ciphers", async (c) => {
 async function touchUser(store, uid) {
   await mutate(store, keys.profile(uid), (cur) => cur ? { ...cur, updatedAt: nowIso() } : void 0);
 }
+function readBulkIds(c, p) {
+  const raw2 = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  if (raw2.some((v) => !validId(v))) return { error: c.json({ error: "invalid id" }, 400) };
+  return { ids: raw2 };
+}
 async function bulkMutate(c, fn) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore2(c.env);
   const now = nowIso();
   for (const id of ids) {
@@ -15967,7 +15995,9 @@ app.post("/api/ciphers/delete", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore2(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -15977,7 +16007,9 @@ app.delete("/api/ciphers", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore2(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -15987,6 +16019,16 @@ app.put("/api/ciphers/restore", (c) => bulkMutate(c, (cur, now) => ({ ...cur, de
 app.post("/api/ciphers/import", importCiphers);
 app.put("/api/ciphers/archive", (c) => bulkMutate(c, (cur, now) => ({ ...cur, archivedAt: now, updatedAt: now })));
 app.put("/api/ciphers/unarchive", (c) => bulkMutate(c, (cur, now) => ({ ...cur, archivedAt: null, updatedAt: now })));
+async function requireOwnFolder(store, userId, folderId) {
+  if (folderId == null || folderId === "") return { folderId: null };
+  const id = String(folderId);
+  if (!validId(id)) return { error: "invalid folder id" };
+  const folder = await store.get(keys.folder(userId, id));
+  if (!folder) {
+    return { error: "Invalid folder: Folder does not exist or belongs to another user" };
+  }
+  return { folderId: id };
+}
 async function moveCiphers(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
@@ -15997,7 +16039,9 @@ async function moveCiphers(c) {
     const folder = await store.get(keys.folder(a.claims.sub, folderId));
     if (!folder) return c.json({ error: "Invalid folder: Folder does not exist or belongs to another user" }, 400);
   }
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const now = nowIso();
   for (const id of ids) {
     await mutate(store, keys.cipher(a.claims.sub, id), (cur) => cur ? { ...cur, folderId, updatedAt: now } : void 0);
@@ -16049,6 +16093,9 @@ async function createCipher(c) {
   const p = await body(c);
   const src = p.cipher ?? p;
   if (!validId(src.id)) return c.json({ error: "invalid id" }, 400);
+  const store = getStore2(c.env);
+  const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
+  if (folder.error) return c.json({ error: folder.error }, 400);
   const now = nowIso();
   const row = {
     id: String(src.id ?? newId()),
@@ -16056,13 +16103,13 @@ async function createCipher(c) {
     type: Number(src.type ?? 1),
     data: cipherDataFrom(src),
     favorite: Boolean(src.favorite),
-    folderId: src.folderId ?? null,
+    folderId: folder.folderId,
     deletedAt: null,
     archivedAt: null,
     createdAt: now,
     updatedAt: now
   };
-  await getStore2(c.env).put(keys.cipher(row.userId, row.id), row, { ifNoneMatch: "*" });
+  await store.put(keys.cipher(row.userId, row.id), row, { ifNoneMatch: "*" });
   return c.json(cipherToJson(row));
 }
 app.post("/api/ciphers", createCipher);
@@ -16073,6 +16120,12 @@ async function updateCipher(c) {
   const p = await body(c);
   const src = p.cipher ?? p;
   const store = getStore2(c.env);
+  let nextFolderId;
+  if (src.folderId !== void 0) {
+    const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
+    if (folder.error) return c.json({ error: folder.error }, 400);
+    nextFolderId = folder.folderId;
+  }
   const next = await mutate(store, keys.cipher(a.claims.sub, c.req.param("id")), (cur) => {
     if (!cur) return void 0;
     const patch = {};
@@ -16086,7 +16139,7 @@ async function updateCipher(c) {
       type: Number(src.type ?? cur.type),
       data: { ...cur.data, ...patch },
       favorite: src.favorite !== void 0 ? Boolean(src.favorite) : cur.favorite,
-      folderId: src.folderId !== void 0 ? src.folderId : cur.folderId,
+      folderId: nextFolderId !== void 0 ? nextFolderId : cur.folderId,
       updatedAt: nowIso()
     };
   });
@@ -16308,7 +16361,7 @@ app.delete("/api/two-factor/authenticator", async (c) => {
   const store = getStore2(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
   if (!tf) return c.json({ error: "TOTP not configured" }, 400);
-  if (String(tf.data).toUpperCase() !== String(p.key ?? "").toUpperCase()) {
+  if (!safeEqual(String(tf.data).toUpperCase(), String(p.key ?? "").toUpperCase())) {
     return c.json({ error: "TOTP key does not match recorded value" }, 400);
   }
   await delTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
@@ -16737,18 +16790,21 @@ async function claimSendIndex(store, s, userId, id) {
     return SEND_INDEX_CONFLICT;
   }
   await store.put(key, { userId, id });
+  const after = (await store.get(key))?.value;
+  if (!after || String(after.userId) !== String(userId) || String(after.id) !== String(id)) {
+    return SEND_INDEX_CONFLICT;
+  }
   return null;
 }
-function pbkdf2B64url(value, saltB64, iterations) {
-  return pbkdf2Sync(String(value), Buffer.from(saltB64, "base64url"), iterations, 32, "sha256").toString(
-    "base64url"
-  );
+async function pbkdf2B64url(value, saltB64, iterations) {
+  const buf = await pbkdf2Async2(String(value), Buffer.from(saltB64, "base64url"), iterations, 32, "sha256");
+  return buf.toString("base64url");
 }
-function sendPasswordHash(password) {
+async function sendPasswordHash(password) {
   if (!password) return { passwordHash: null, passwordSalt: null, passwordIter: null };
   const salt = randomBytes2(16).toString("base64url");
   return {
-    passwordHash: pbkdf2B64url(password, salt, SEND_PASSWORD_ITER),
+    passwordHash: await pbkdf2B64url(password, salt, SEND_PASSWORD_ITER),
     passwordSalt: salt,
     passwordIter: SEND_PASSWORD_ITER
   };
@@ -16756,13 +16812,46 @@ function sendPasswordHash(password) {
 function sendHasPassword(s) {
   return Boolean(s.passwordHash);
 }
-function checkSendPassword(s, candidate) {
+async function checkSendPassword(s, candidate) {
   if (!sendHasPassword(s)) return true;
   if (!candidate) return false;
-  const computed = pbkdf2B64url(candidate, s.passwordSalt, s.passwordIter ?? SEND_PASSWORD_ITER);
+  const computed = await pbkdf2B64url(candidate, s.passwordSalt, s.passwordIter ?? SEND_PASSWORD_ITER);
   const a = Buffer.from(computed);
   const b = Buffer.from(String(s.passwordHash));
   return a.length === b.length && timingSafeEqual3(a, b);
+}
+var SEND_PASSWORD_MAX_FAILS = 5;
+var SEND_PASSWORD_LOCK_MS = 15 * 60 * 1e3;
+async function verifySendPassword(store, send, candidate) {
+  if (!sendHasPassword(send)) return { ok: true };
+  const now = Date.now();
+  if (Number(send.lockedUntil ?? 0) > now) {
+    return { ok: false, locked: true, error: "Too many failed attempts. Try again later." };
+  }
+  if (await checkSendPassword(send, candidate)) {
+    if (Number(send.failedAttempts ?? 0) > 0) {
+      await mutate(
+        store,
+        keys.send(send.userId, send.id),
+        (cur) => cur ? { ...cur, failedAttempts: 0, lockedUntil: null } : void 0
+      ).catch(() => {
+      });
+    }
+    return { ok: true };
+  }
+  const fails = Number(send.failedAttempts ?? 0) + 1;
+  const lockedUntil = fails >= SEND_PASSWORD_MAX_FAILS ? now + SEND_PASSWORD_LOCK_MS : null;
+  await mutate(
+    store,
+    keys.send(send.userId, send.id),
+    (cur) => cur ? { ...cur, failedAttempts: fails, lockedUntil, updatedAt: nowIso() } : void 0
+  ).catch(() => {
+  });
+  return {
+    ok: false,
+    locked: Boolean(lockedUntil),
+    error: lockedUntil ? "Too many failed attempts. Try again later." : "Invalid password"
+  };
 }
 function validateSendAccess(s, nowIsoStr = nowIso()) {
   if (s.disabled) return { error: "Send is not accessible", status: 404 };
@@ -16878,7 +16967,7 @@ async function createTextSend(c) {
     deletionDate: dates.deletionDate,
     disabled: Boolean(p.disabled),
     hideEmail: Boolean(p.hideEmail),
-    ...sendPasswordHash(p.password)
+    ...await sendPasswordHash(p.password)
   };
   const store = getStore2(c.env);
   const accessId = accessIdFromUuid(id);
@@ -16898,9 +16987,9 @@ app.put("/api/sends/:id", async (c) => {
   const store = getStore2(c.env);
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
+  const nextPw = p.password !== void 0 ? await sendPasswordHash(p.password) : {};
   const next = await mutate(store, keys.send(a.claims.sub, c.req.param("id")), (cur) => {
     if (!cur) return void 0;
-    const nextPw = p.password !== void 0 ? sendPasswordHash(p.password) : {};
     return {
       ...cur,
       name: p.name !== void 0 ? String(p.name) : cur.name,
@@ -16966,8 +17055,9 @@ app.post("/api/sends/access/:accessId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   const p = await body(c);
   const password = p.password ?? p.passwordHash ?? null;
-  if (sendHasPassword(send) && !checkSendPassword(send, password)) {
-    return c.json({ error: password ? "Invalid password" : "Password required" }, 401);
+  if (sendHasPassword(send)) {
+    const pw = await verifySendPassword(store, send, password);
+    if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
   try {
     await mutate(
@@ -17048,9 +17138,9 @@ app.post("/api/sends/access/file/:fileId", async (c) => {
   if (v.error) return c.json({ error: v.error }, v.status);
   if (sendHasPassword(send) && !tokenBound) {
     const inline = p.password ?? p.passwordHash ?? null;
-    if (!checkSendPassword(send, inline)) {
-      const msg = inline ? "Invalid password" : "Password required";
-      return c.json({ error: msg, message: msg, statusCode: 401 }, 401);
+    const pw = await verifySendPassword(store, send, inline);
+    if (!pw.ok) {
+      return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
     }
   }
   const bytes = await store.getBinary(keys.sendFile(send.userId, send.id));
@@ -17136,7 +17226,7 @@ app.post("/api/sends/file/v2", async (c) => {
     deletionDate: dates.deletionDate,
     disabled: Boolean(p.disabled),
     hideEmail: Boolean(p.hideEmail),
-    ...sendPasswordHash(p.password)
+    ...await sendPasswordHash(p.password)
   };
   const functionMax = Number(envGet(c, "UPLOAD_MAX_BYTES", 6 * 1024 * 1024)) || 0;
   if (functionMax && size > functionMax) {
@@ -17284,8 +17374,9 @@ app.post("/api/sends/:id/access/file/:fileId", async (c) => {
   if (!send) return c.json({ error: "Send is not accessible" }, 404);
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
-  if (sendHasPassword(send) && !checkSendPassword(send, p.password ?? null)) {
-    return c.json({ error: "Invalid password" }, 401);
+  if (sendHasPassword(send)) {
+    const pw = await verifySendPassword(store, send, p.password ?? null);
+    if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
   try {
     await mutate(
@@ -17576,6 +17667,8 @@ app.put("/api/auth-requests/:id", async (c) => {
   return c.json(authRequestToJson(ar, baseUrlOf(c)));
 });
 app.get("/api/auth-requests/:id/response", async (c) => {
+  const rl = await limit(c, "auth-request-response", requestIp(c), 20, 60);
+  if (rl) return rl;
   const store = getStore2(c.env);
   const hit = (await store.get(keys.authRequestIndex(c.req.param("id"))))?.value;
   if (!hit) return c.json({ error: "AuthRequest doesn't exist" }, 400);
@@ -17657,7 +17750,7 @@ app.post("/api/sends/file", async (c) => {
     deletionDate: dates.deletionDate,
     disabled: false,
     hideEmail: false,
-    ...sendPasswordHash(f.password)
+    ...await sendPasswordHash(f.password)
   };
   const legacyAccessId = accessIdFromUuid(id);
   if (!legacyAccessId) return c.json({ error: "invalid send id" }, 400);

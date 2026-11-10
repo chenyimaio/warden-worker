@@ -207,7 +207,7 @@ curl -s -X POST localhost:8787/api/accounts/password-hint \
 
 | 命令 | 用途 |
 |---|---|
-| `npm run smoke` | 172 项契约测试（memory 存储） |
+| `npm run smoke` | 187 项契约测试（memory 存储） |
 | `npm run parity` | 与上游 Rust 路由做集合比对 |
 | `npm run test:blob` | Blob 适配器测试 |
 | `node scripts/test-upload.mjs` | multipart 解析测试 |

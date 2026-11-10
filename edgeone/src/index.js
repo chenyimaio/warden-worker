@@ -2,7 +2,10 @@
 // Bitwarden-compatible backend (EdgeOne Makers / Cloud Functions, Node.js). Behaviour mirrors warden-worker (Rust); route list in README.
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, pbkdf2, randomBytes, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
+
+const pbkdf2Async = promisify(pbkdf2);
 import {
   newId,
   nowIso,
@@ -107,6 +110,9 @@ app.use('*', cors(corsOptions));
 // 批量接口的条目上限：防止一个请求塞几万条 id，把函数拖到超时、产生大量存储写入
 const BULK_MAX_IDS = 2000;
 const IMPORT_MAX_ITEMS = 5000;
+
+// 注册时的邮箱格式：本地部分 + 域名，不允许尖括号/空格等会污染存储键与邮件的字符
+const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 
 // 一次性/限次令牌：URL 里的票据会进访问日志、浏览器历史、Referer，泄露后能被重放。
 // 这里记录用量（默认最多 3 次，够客户端重试），并低频清理过期标记。
@@ -234,23 +240,47 @@ async function sweepRateKeys(store, now) {
     /* 清理失败不影响限流本身 */
   }
 }
-// 限流分桶：拿不到可信客户端 IP 时退到一个共享桶，但把上限放大。
-// 既不误伤正常流量（所有人共用一个严格阈值会互相踩），也不至于完全敞开
-// （高速暴力 / 枚举仍然会被挡住）。
+// 限流分桶：拿不到可信客户端 IP 时退到一个共享桶。
+//
+// 这里有两个互相拉扯的风险：
+//   a) 桶太严 —— 任何人打满就能让所有人在同一窗口被 429（DoS 反噬）；
+//   b) 桶太松 —— 等于没有 IP 限流，枚举/爆破畅通。
+// 所以按端点分两类：
+//   · 敏感端点（登录、注册、prelogin、Send 口令…）用一个**宽松总闸**，
+//     把"打满就能锁住全站"的代价从几十次抬到几百次；
+//   · 其余端点（下载类）按比例放大，尽量不影响正常流量。
 const SHARED_RATE_BUCKET = 'shared-untrusted-ip';
 const SHARED_RATE_FACTOR = 10;
 const SHARED_RATE_MIN = 120;
+const SHARED_STRICT_FLOOR = 600;
 
-function rateBucket(id, max) {
+// 这些 kind 拿不到 IP 时改用宽松总闸，而不是沿用各自的严格阈值
+const SHARED_STRICT_KINDS = new Set([
+  'login-ip',
+  'register',
+  'register-email',
+  'prelogin',
+  'hint-ip',
+  'verify-password',
+  'knowndevice',
+  'send-access',
+  'send-access-legacy',
+  'auth-request',
+  'auth-request-response',
+  'auth-request-approve',
+]);
+
+function rateBucket(id, max, kind = '') {
   if (id != null && id !== '') return { id, max };
-  return {
-    id: SHARED_RATE_BUCKET,
-    max: Math.max(Number(max || 0) * SHARED_RATE_FACTOR, SHARED_RATE_MIN),
-  };
+  const base = Number(max || 0);
+  if (SHARED_STRICT_KINDS.has(kind)) {
+    return { id: SHARED_RATE_BUCKET, max: Math.max(base, SHARED_STRICT_FLOOR) };
+  }
+  return { id: SHARED_RATE_BUCKET, max: Math.max(base * SHARED_RATE_FACTOR, SHARED_RATE_MIN) };
 }
 
 async function limit(c, kind, id, max, windowSec) {
-  const bucket = rateBucket(id, max);
+  const bucket = rateBucket(id, max, kind);
   const store = getStore(c.env);
   const digest = createHash('sha256').update(`${kind}:${bucket.id}`).digest('hex').slice(0, 32);
   const key = keys.rate(`${kind}/${digest}`);
@@ -277,7 +307,7 @@ async function limit(c, kind, id, max, windowSec) {
  */
 async function limits(c, specs) {
   const usable = specs.map((s) => {
-    const b = rateBucket(s.id, s.max);
+    const b = rateBucket(s.id, s.max, s.kind);
     return { ...s, id: b.id, max: b.max };
   });
   const store = getStore(c.env);
@@ -333,7 +363,7 @@ const hintFieldsFrom = (plaintext) => {
   return { masterPasswordHint: text || null, masterPasswordHintEnc: null };
 };
 
-// 服务端二次哈希的迭代数：环境变量可能被写成 0 或极小值（pbkdf2Sync 会直接抛错，
+// 服务端二次哈希的迭代数：环境变量可能被写成 0 或极小值（pbkdf2 会直接抛错，
 // 而极小的值等于把存储层哈希废掉），这里统一兜一个下限。
 const PBKDF2_MIN_ITERATIONS = 60000;
 const pbkdf2Iterations = (c) =>
@@ -573,7 +603,9 @@ async function register(c) {
   const email = String(p.email ?? '').trim().toLowerCase();
   const rl = await limit(c, 'register', requestIp(c), 10, 60);
   if (rl) return rl;
-  if (!email) return c.json({ error: 'invalid email' }, 400);
+  if (!email || !EMAIL_RE.test(email) || email.length > 254) {
+    return c.json({ error: 'invalid email' }, 400);
+  }
   // 按邮箱再限一层：注册接口会回答"邮箱是否已存在"，限流把枚举成本抬起来
   const rlEmail = await limit(c, 'register-email', email, 5, 60);
   if (rlEmail) return rlEmail;
@@ -756,10 +788,10 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
           const { payload } = await verifyRemember(c.env, code);
           if (payload.sub !== deviceId || payload.uid !== user.id) throw new Error('remember mismatch');
           const dev = await store.get(keys.device(user.id, deviceId));
-          if (!dev || dev.value.twofactorRemember !== code) throw new Error('remember mismatch');
+          if (!dev || !safeEqual(dev.value.twofactorRemember, code)) throw new Error('remember mismatch');
         } else if (provider === TFA_RECOVERY) {
           const stored = String(openSecret(c.env, user.totpRecover) ?? '');
-          if (!stored || stored.toUpperCase() !== code.trim().toUpperCase()) {
+          if (!stored || !safeEqual(stored.toUpperCase(), code.trim().toUpperCase())) {
             return c.json({ error: 'Recovery code is incorrect' }, 400);
           }
 // recovery code is one-shot: drop 2FA + recover code + remember tokens
@@ -863,7 +895,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
       }));
       return c.json({ error: 'invalid_grant', send_access_error_type: 'unavailable' }, 400);
     }
-    if (sendHasPassword(send) && !checkSendPassword(send, provided)) {
+    if (sendHasPassword(send) && !(await verifySendPassword(store, send, provided)).ok) {
       console.warn('[send-access] password required/invalid');
       return c.json(
         {
@@ -1061,11 +1093,21 @@ async function touchUser(store, uid) {
   await mutate(store, keys.profile(uid), (cur) => (cur ? { ...cur, updatedAt: nowIso() } : undefined));
 }
 
+// 批量接口的 ids：统一截断 + 校验。任何一个非法就整体拒绝，
+// 否则 "../../<victim>/profile" 这种会直接拼进存储键。
+function readBulkIds(c, p) {
+  const raw = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  if (raw.some((v) => !validId(v))) return { error: c.json({ error: 'invalid id' }, 400) };
+  return { ids: raw };
+}
+
 async function bulkMutate(c, fn) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore(c.env);
   const now = nowIso();
   for (const id of ids) {
@@ -1085,7 +1127,9 @@ app.post('/api/ciphers/delete', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -1095,7 +1139,9 @@ app.delete('/api/ciphers', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
   const p = await body(c);
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const store = getStore(c.env);
   for (const id of ids) await store.del(keys.cipher(a.claims.sub, id));
   await touchUser(store, a.claims.sub);
@@ -1108,6 +1154,20 @@ app.put('/api/ciphers/archive', (c) => bulkMutate(c, (cur, now) => ({ ...cur, ar
 app.put('/api/ciphers/unarchive', (c) => bulkMutate(c, (cur, now) => ({ ...cur, archivedAt: null, updatedAt: now })));
 
 // olderId /null  folder  400
+// folderId 归属校验。存储键按当前用户拼（u/{uid}/folders/{id}），
+// 所以查不到就说明要么不存在、要么是别人的 folder —— 两种情况都拒绝。
+// move 一直是这么做的，create / update 之前漏了。
+async function requireOwnFolder(store, userId, folderId) {
+  if (folderId == null || folderId === '') return { folderId: null };
+  const id = String(folderId);
+  if (!validId(id)) return { error: 'invalid folder id' };
+  const folder = await store.get(keys.folder(userId, id));
+  if (!folder) {
+    return { error: 'Invalid folder: Folder does not exist or belongs to another user' };
+  }
+  return { folderId: id };
+}
+
 async function moveCiphers(c) {
   const a = await requireAuth(c);
   if (a.error) return a.error;
@@ -1118,7 +1178,9 @@ async function moveCiphers(c) {
     const folder = await store.get(keys.folder(a.claims.sub, folderId));
     if (!folder) return c.json({ error: 'Invalid folder: Folder does not exist or belongs to another user' }, 400);
   }
-  const ids = Array.isArray(p.ids) ? p.ids.slice(0, BULK_MAX_IDS).map(String) : [];
+  const bid = readBulkIds(c, p);
+  if (bid.error) return bid.error;
+  const ids = bid.ids;
   const now = nowIso();
   for (const id of ids) {
     await mutate(store, keys.cipher(a.claims.sub, id), (cur) => (cur ? { ...cur, folderId, updatedAt: now } : undefined));
@@ -1176,6 +1238,9 @@ async function createCipher(c) {
   const src = p.cipher ?? p;
   // id 会直接拼进存储键（u/{uid}/ciphers/{id}.json），客户端自报的 id 必须是安全字符
   if (!validId(src.id)) return c.json({ error: 'invalid id' }, 400);
+  const store = getStore(c.env);
+  const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
+  if (folder.error) return c.json({ error: folder.error }, 400);
   const now = nowIso();
   const row = {
     id: String(src.id ?? newId()),
@@ -1183,13 +1248,13 @@ async function createCipher(c) {
     type: Number(src.type ?? 1),
     data: cipherDataFrom(src),
     favorite: Boolean(src.favorite),
-    folderId: src.folderId ?? null,
+    folderId: folder.folderId,
     deletedAt: null,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,
   };
-  await getStore(c.env).put(keys.cipher(row.userId, row.id), row, { ifNoneMatch: '*' });
+  await store.put(keys.cipher(row.userId, row.id), row, { ifNoneMatch: '*' });
   return c.json(cipherToJson(row));
 }
 app.post('/api/ciphers', createCipher);
@@ -1201,6 +1266,13 @@ async function updateCipher(c) {
   const p = await body(c);
   const src = p.cipher ?? p;
   const store = getStore(c.env);
+  // folderId 归属校验要在 mutate 之前做（回调是同步的）
+  let nextFolderId;
+  if (src.folderId !== undefined) {
+    const folder = await requireOwnFolder(store, a.claims.sub, src.folderId);
+    if (folder.error) return c.json({ error: folder.error }, 400);
+    nextFolderId = folder.folderId;
+  }
   const next = await mutate(store, keys.cipher(a.claims.sub, c.req.param('id')), (cur) => {
     if (!cur) return undefined;
 // only merge fields the client actually sent, never null out name/notes
@@ -1215,7 +1287,7 @@ async function updateCipher(c) {
       type: Number(src.type ?? cur.type),
       data: { ...cur.data, ...patch },
       favorite: src.favorite !== undefined ? Boolean(src.favorite) : cur.favorite,
-      folderId: src.folderId !== undefined ? src.folderId : cur.folderId,
+      folderId: nextFolderId !== undefined ? nextFolderId : cur.folderId,
       updatedAt: nowIso(),
     };
   });
@@ -1467,7 +1539,7 @@ app.delete('/api/two-factor/authenticator', async (c) => {
   const store = getStore(c.env);
   const tf = await getTwoFactor(store, a.claims.sub, TFA_AUTHENTICATOR);
   if (!tf) return c.json({ error: 'TOTP not configured' }, 400);
-  if (String(tf.data).toUpperCase() !== String(p.key ?? '').toUpperCase()) {
+  if (!safeEqual(String(tf.data).toUpperCase(), String(p.key ?? '').toUpperCase())) {
     return c.json({ error: 'TOTP key does not match recorded value' }, 400);
   }
 
@@ -2011,20 +2083,27 @@ async function claimSendIndex(store, s, userId, id) {
     return SEND_INDEX_CONFLICT;
   }
   await store.put(key, { userId, id });
+  // 写后回读：Blob 没有条件写，两个并发请求可能都读到"不存在"然后都写。
+  // 回读一次能发现被覆盖的情况，把双写降级成"一方失败"。
+  const after = (await store.get(key))?.value;
+  if (!after || String(after.userId) !== String(userId) || String(after.id) !== String(id)) {
+    return SEND_INDEX_CONFLICT;
+  }
   return null;
 }
 
-function pbkdf2B64url(value, saltB64, iterations) {
-  return pbkdf2Sync(String(value), Buffer.from(saltB64, 'base64url'), iterations, 32, 'sha256').toString(
-    'base64url',
-  );
+// Send 口令的 PBKDF2 也走线程池：同步版本会阻塞事件循环，
+// 实测单进程只能到 ~78 次/秒，等于把暴力破解速率钉死在那，同时拖慢所有并发请求。
+async function pbkdf2B64url(value, saltB64, iterations) {
+  const buf = await pbkdf2Async(String(value), Buffer.from(saltB64, 'base64url'), iterations, 32, 'sha256');
+  return buf.toString('base64url');
 }
 
-function sendPasswordHash(password) {
+async function sendPasswordHash(password) {
   if (!password) return { passwordHash: null, passwordSalt: null, passwordIter: null };
   const salt = randomBytes(16).toString('base64url');
   return {
-    passwordHash: pbkdf2B64url(password, salt, SEND_PASSWORD_ITER),
+    passwordHash: await pbkdf2B64url(password, salt, SEND_PASSWORD_ITER),
     passwordSalt: salt,
     passwordIter: SEND_PASSWORD_ITER,
   };
@@ -2034,13 +2113,44 @@ function sendHasPassword(s) {
   return Boolean(s.passwordHash);
 }
 
-function checkSendPassword(s, candidate) {
+async function checkSendPassword(s, candidate) {
   if (!sendHasPassword(s)) return true;
   if (!candidate) return false;
-  const computed = pbkdf2B64url(candidate, s.passwordSalt, s.passwordIter ?? SEND_PASSWORD_ITER);
+  const computed = await pbkdf2B64url(candidate, s.passwordSalt, s.passwordIter ?? SEND_PASSWORD_ITER);
   const a = Buffer.from(computed);
   const b = Buffer.from(String(s.passwordHash));
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// 每条 Send 的口令失败计数：外层 IP 限流换 IP 就绕过，
+// 只有把失败记在 Send 自己身上才能真正挡住针对单条链接的爆破。
+const SEND_PASSWORD_MAX_FAILS = 5;
+const SEND_PASSWORD_LOCK_MS = 15 * 60 * 1000;
+
+async function verifySendPassword(store, send, candidate) {
+  if (!sendHasPassword(send)) return { ok: true };
+  const now = Date.now();
+  if (Number(send.lockedUntil ?? 0) > now) {
+    return { ok: false, locked: true, error: 'Too many failed attempts. Try again later.' };
+  }
+  if (await checkSendPassword(send, candidate)) {
+    if (Number(send.failedAttempts ?? 0) > 0) {
+      await mutate(store, keys.send(send.userId, send.id), (cur) =>
+        cur ? { ...cur, failedAttempts: 0, lockedUntil: null } : undefined,
+      ).catch(() => {});
+    }
+    return { ok: true };
+  }
+  const fails = Number(send.failedAttempts ?? 0) + 1;
+  const lockedUntil = fails >= SEND_PASSWORD_MAX_FAILS ? now + SEND_PASSWORD_LOCK_MS : null;
+  await mutate(store, keys.send(send.userId, send.id), (cur) =>
+    cur ? { ...cur, failedAttempts: fails, lockedUntil, updatedAt: nowIso() } : undefined,
+  ).catch(() => {});
+  return {
+    ok: false,
+    locked: Boolean(lockedUntil),
+    error: lockedUntil ? 'Too many failed attempts. Try again later.' : 'Invalid password',
+  };
 }
 
 /**  Rust SendDB::validate_access */
@@ -2170,7 +2280,7 @@ async function createTextSend(c) {
     deletionDate: dates.deletionDate,
     disabled: Boolean(p.disabled),
     hideEmail: Boolean(p.hideEmail),
-    ...sendPasswordHash(p.password),
+    ...(await sendPasswordHash(p.password)),
   };
 
   const store = getStore(c.env);
@@ -2193,9 +2303,10 @@ app.put('/api/sends/:id', async (c) => {
   const dates = validateSendDates(p.deletionDate, p.expirationDate);
   if (dates.error) return c.json({ error: dates.error }, dates.status);
 
+  // mutate 的回调是同步的：口令哈希要先算好
+  const nextPw = p.password !== undefined ? await sendPasswordHash(p.password) : {};
   const next = await mutate(store, keys.send(a.claims.sub, c.req.param('id')), (cur) => {
     if (!cur) return undefined;
-    const nextPw = p.password !== undefined ? sendPasswordHash(p.password) : {};
     return {
       ...cur,
       name: p.name !== undefined ? String(p.name) : cur.name,
@@ -2270,8 +2381,9 @@ app.post('/api/sends/access/:accessId', async (c) => {
 
   const p = await body(c);
   const password = p.password ?? p.passwordHash ?? null;
-  if (sendHasPassword(send) && !checkSendPassword(send, password)) {
-    return c.json({ error: password ? 'Invalid password' : 'Password required' }, 401);
+  if (sendHasPassword(send)) {
+    const pw = await verifySendPassword(store, send, password);
+    if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
 
   try {
@@ -2368,9 +2480,9 @@ app.post('/api/sends/access/file/:fileId', async (c) => {
   // 兼容：客户端把密码直接内联在这个请求里也认（网页版个别路径会这么发）。
   if (sendHasPassword(send) && !tokenBound) {
     const inline = p.password ?? p.passwordHash ?? null;
-    if (!checkSendPassword(send, inline)) {
-      const msg = inline ? 'Invalid password' : 'Password required';
-      return c.json({ error: msg, message: msg, statusCode: 401 }, 401);
+    const pw = await verifySendPassword(store, send, inline);
+    if (!pw.ok) {
+      return c.json({ error: pw.error, message: pw.error, statusCode: 401 }, 401);
     }
   }
 
@@ -2477,7 +2589,7 @@ app.post('/api/sends/file/v2', async (c) => {
     deletionDate: dates.deletionDate,
     disabled: Boolean(p.disabled),
     hideEmail: Boolean(p.hideEmail),
-    ...sendPasswordHash(p.password),
+    ...(await sendPasswordHash(p.password)),
   };
 
   // 平台对**请求体和响应体**都有约 6 MB 的限制（实测 8.95 MB 的下载直接返回 413），
@@ -2670,8 +2782,9 @@ app.post('/api/sends/:id/access/file/:fileId', async (c) => {
 
   const v = validateSendAccess(send);
   if (v.error) return c.json({ error: v.error }, v.status);
-  if (sendHasPassword(send) && !checkSendPassword(send, p.password ?? null)) {
-    return c.json({ error: 'Invalid password' }, 401);
+  if (sendHasPassword(send)) {
+    const pw = await verifySendPassword(store, send, p.password ?? null);
+    if (!pw.ok) return c.json({ error: pw.error }, 401);
   }
 
   try {
@@ -2892,7 +3005,9 @@ const requestIp = (c) => {
 };
 
 // 请求 IP 与签发时记录的 IP 是否不一致。
-// 任何一方缺失（拿不到可信头）时不参与判断，避免把所有设备都判成不匹配。
+// 任何一方缺失（平台没注入可信头）时不参与判断——否则在国际站上
+// "login with device 必须同 IP" 会把所有合法设备判成不匹配，功能直接不可用。
+// 这个降级是有意的：accessCode 本身才是主要凭据，IP 只是纵深防御的一层。
 const ipMismatch = (recorded, current) => Boolean(recorded) && Boolean(current) && String(recorded) !== String(current);
 const requestDeviceType = (c) =>
   Number(c.req.header('device-type') ?? c.req.header('x-device-type') ?? 14) || 14;
@@ -3019,6 +3134,9 @@ app.put('/api/auth-requests/:id', async (c) => {
 });
 
 app.get('/api/auth-requests/:id/response', async (c) => {
+  // 这个端点要拿 accessCode 去比，必须限流，否则就是一条免认证的爆破通道
+  const rl = await limit(c, 'auth-request-response', requestIp(c), 20, 60);
+  if (rl) return rl;
   const store = getStore(c.env);
   const hit = (await store.get(keys.authRequestIndex(c.req.param('id'))))?.value;
   if (!hit) return c.json({ error: "AuthRequest doesn't exist" }, 400);
@@ -3115,7 +3233,7 @@ app.post('/api/sends/file', async (c) => {
     deletionDate: dates.deletionDate,
     disabled: false,
     hideEmail: false,
-    ...sendPasswordHash(f.password),
+    ...(await sendPasswordHash(f.password)),
   };
   // 旧 multipart 通道：同样要校验 id、占用索引前先查冲突、并遵守上传大小上限
   const legacyAccessId = accessIdFromUuid(id);

@@ -1047,6 +1047,93 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('旧 multipart 通道 id=../../profile -> 400', legacyRes.status === 400, legacyRes.status);
 }
 
+// 32. 安全回归（第五轮审计）：bulk ids / 邮箱格式 / folderId 归属 / 每 Send 口令失败计数
+{
+  const mkUser = async (tag) => {
+    const addr = `${tag}-${Date.now()}@example.com`;
+    await call('POST', '/api/accounts/register', {
+      body: {
+        email: addr, masterPasswordHash: `${tag}-mph`, userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    return (await call('POST', '/identity/connect/token', {
+      form: {
+        grant_type: 'password', username: addr, password: `${tag}-mph`, scope: 'api offline_access',
+        client_id: 'web', deviceType: '10', deviceIdentifier: `dev-${tag}`, deviceName: tag,
+      },
+    })).data?.access_token;
+  };
+  const ua = await mkUser('r5a');
+  const ub = await mkUser('r5b');
+
+  // bulk 接口的 ids 必须校验（否则会拼进存储键）
+  for (const [m, p] of [
+    ['PUT', '/api/ciphers/delete'],
+    ['POST', '/api/ciphers/delete'],
+    ['PUT', '/api/ciphers/restore'],
+    ['PUT', '/api/ciphers/archive'],
+    ['PUT', '/api/ciphers/unarchive'],
+    ['POST', '/api/ciphers/move'],
+  ]) {
+    r = await call(m, p, { token: ua, body: { ids: ['../../victim/profile'], folderId: null } });
+    check(`bulk ${m} ${p} 非法 id -> 400`, r.status === 400, r);
+  }
+
+  // 正常 id 仍然可用
+  r = await call('POST', '/api/ciphers', { token: ua, body: { type: 1, name: 'ok', login: {} } });
+  const okCipher = r.data?.id;
+  r = await call('PUT', '/api/ciphers/delete', { token: ua, body: { ids: [okCipher] } });
+  check('bulk 合法 id -> 200', r.status === 200, r);
+
+  // 邮箱格式
+  for (const bad of ['a<b>@example.com', 'not-an-email', 'a@b']) {
+    r = await call('POST', '/api/accounts/register', {
+      body: {
+        email: bad, masterPasswordHash: 'x', userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    check(`注册邮箱 ${bad} -> 400`, r.status === 400, r);
+  }
+
+  // folderId 归属：用别人的 folder 应被拒
+  r = await call('POST', '/api/folders', { token: ub, body: { name: 'bob-folder' } });
+  const bobFolder = r.data?.id;
+  r = await call('POST', '/api/ciphers', { token: ua, body: { type: 1, name: 'x', login: {}, folderId: bobFolder } });
+  check('create 用他人 folderId -> 400', r.status === 400, r);
+  r = await call('POST', '/api/ciphers', { token: ua, body: { type: 1, name: 'y', login: {} } });
+  const ownCipher = r.data?.id;
+  r = await call('PUT', `/api/ciphers/${ownCipher}`, { token: ua, body: { folderId: bobFolder } });
+  check('update 用他人 folderId -> 400', r.status === 400, r);
+  r = await call('POST', '/api/folders', { token: ua, body: { name: 'alice-folder' } });
+  const ownFolder = r.data?.id;
+  r = await call('POST', '/api/ciphers', { token: ua, body: { type: 1, name: 'z', login: {}, folderId: ownFolder } });
+  check('create 用自己的 folderId -> 200', r.status === 200, r);
+
+  // 每 Send 口令失败计数：换 IP 也挡得住
+  const delDate = new Date(Date.now() + 86400e3).toISOString();
+  r = await call('POST', '/api/sends', {
+    token: ua,
+    body: { type: 0, key: 'k', name: 'pw-send', text: { text: 'x' }, deletionDate: delDate, password: 'letmein' },
+  });
+  const pwAccess = r.data?.accessId;
+  const seen = [];
+  for (let i = 0; i < 6; i++) {
+    const x = await call('POST', `/api/sends/access/${pwAccess}`, {
+      body: { password: `wrong${i}` },
+      headers: { 'eo-connecting-ip': `10.9.9.${i}` },
+    });
+    seen.push(x.status);
+  }
+  check('Send 口令连错 6 次（每次换 IP）仍然被锁定', seen.slice(-1)[0] === 401, seen);
+  r = await call('POST', `/api/sends/access/${pwAccess}`, {
+    body: { password: 'letmein' },
+    headers: { 'eo-connecting-ip': '10.9.9.99' },
+  });
+  check('锁定期内即使口令正确也被拒', r.status === 401, r);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {
