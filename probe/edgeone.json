@@ -1,0 +1,10 @@
+{
+  "name": "eo-probe",
+  "installCommand": "node -e \"process.exit(0)\"",
+  "buildCommand": "node -e \"process.exit(0)\"",
+  "outputDirectory": "public",
+  "nodeVersion": "20.18.0",
+  "cloudFunctions": {
+    "maxDuration": 10
+  }
+}
