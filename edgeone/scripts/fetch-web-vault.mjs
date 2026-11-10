@@ -172,6 +172,34 @@ async function main() {
   // 注意：这里**不往 index.html 里注入任何脚本**。这个页面会处理主密码，
   // 任何第三方注入都等于在密钥旁边放代码；上游渲染层的 UI 小毛病不该用这种方式修。
 
+  // 产物自检：坏掉的 index.html 部署上去会表现得像"网页版有 bug"（比如组件渲染两遍、
+  // 登录页出现两个邮箱输入框），而排查时很难分清是上游模板问题还是我们产物拼错了。
+  // 这里把能机械判断的几项钉死，不合格直接让构建失败。
+  {
+    const html = readFileSync(indexPath, 'utf8');
+    const count = (re) => (html.match(re) ?? []).length;
+    const problems = [];
+
+    const appRoots = count(/<app-root[\s>]/g);
+    if (appRoots !== 1) problems.push(`<app-root> 出现 ${appRoots} 次（应为 1）——多份入口会让组件渲染多遍`);
+
+    const scripts = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1]);
+    const dupScripts = scripts.filter((s, i) => scripts.indexOf(s) !== i);
+    if (dupScripts.length) problems.push(`重复的 <script src>：${[...new Set(dupScripts)].join(', ')}`);
+    if (!scripts.some((s) => /main[.-]/.test(s))) problems.push('没找到 main*.js 入口脚本');
+
+    if (!/<base\s+href=/i.test(html)) problems.push('缺少 <base href>，子路径部署时资源会解析到错误位置');
+
+    const styles = [...html.matchAll(/<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"/g)].map((m) => m[1]);
+    const missing = styles.filter((s) => !/^https?:/i.test(s) && !existsSync(join(OUT_DIR, s.replace(/^\//, ''))));
+    if (missing.length) problems.push(`引用了不存在的样式：${missing.join(', ')}`);
+
+    if (problems.length) {
+      throw new Error(`网页版产物自检未通过：\n  - ${problems.join('\n  - ')}`);
+    }
+    log(`产物自检通过（app-root×1，脚本 ${scripts.length} 个，样式 ${styles.length} 个）`);
+  }
+
 
   log(`完成 -> ${OUT_DIR} (${mb(after)}, ${walk(OUT_DIR).length} 个文件)`);
 }
