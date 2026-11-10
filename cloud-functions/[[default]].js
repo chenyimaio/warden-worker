@@ -17735,6 +17735,14 @@ function notFoundPage(c) {
 </body></html>`;
   return c.html(html, 404);
 }
+app.get("/favicon.ico", (c) => c.body(null, 204, { "cache-control": "public, max-age=86400" }));
+app.get(
+  "/robots.txt",
+  (c) => c.text("User-agent: *\nDisallow: /\n", 200, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "public, max-age=86400"
+  })
+);
 app.all("*", (c) => {
   const path = new URL(c.req.url).pathname;
   const method = c.req.method;

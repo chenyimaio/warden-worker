@@ -3178,6 +3178,16 @@ function notFoundPage(c) {
   return c.html(html, 404);
 }
 
+// 没部署网页版时（public/ 为空），浏览器的 /favicon.ico 和爬虫的 /robots.txt 也会落到函数，
+// 每来一次就是一次冷启动+调用。给这两个固定路径便宜的回答，并让 CDN/浏览器缓存住。
+app.get('/favicon.ico', (c) => c.body(null, 204, { 'cache-control': 'public, max-age=86400' }));
+app.get('/robots.txt', (c) =>
+  c.text('User-agent: *\nDisallow: /\n', 200, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'public, max-age=86400',
+  }),
+);
+
 app.all('*', (c) => {
   const path = new URL(c.req.url).pathname;
   const method = c.req.method;
