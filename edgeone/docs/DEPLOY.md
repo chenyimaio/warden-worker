@@ -151,7 +151,7 @@ BASE=https://vault.example.com npm run accept
 | 所有接口 500，日志有 `getStore is not defined` | 没装依赖 | `npm ci --omit=dev` |
 | 登录 401，`/api/alive` 正常 | `JWT_SECRET` 每次部署变化 | 用控制台的固定环境变量，别用随机值 |
 | 写完立刻读不到 | Blob 默认最终一致 | 本项目所有读都带 `consistency:'strong'`，若仍出现，检查是否绕过了 `store.get` |
-| 附件上传 413 | `ATTACHMENT_MAX_BYTES` 太小 / 平台 body 限制 | 调大或改用 `createUploadUrl` 直传 |
+| 附件上传 413 | `UPLOAD_MAX_BYTES` 太小 / 平台 body 限制 | 调大或改用 `createUploadUrl` 直传 |
 | 邮件发不出但接口 200 | SMTP 失败只写日志 | 看 Functions 日志里的 `[mail]` 与 `info.response` |
 | TOTP 总是错 | 手机与服务器时间偏差 > 30s | 同步 NTP，或临时 `ALLOW_TOTP_DRIFT=true` |
 | 客户端一直转圈 | `/notifications/hub` 被绑到了函数且没降级 | 解绑该路由，或保留 426 让客户端回退轮询 |

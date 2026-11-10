@@ -106,9 +106,10 @@ export async function verifyRemember(env, token) {
 // 只授予「这一个附件、10 分钟」，泄露也换不到别的数据。
 const ATT_TTL_SEC = 600;
 
-export function makeAttachmentToken(env, { uid, aid, ttl = ATT_TTL_SEC }) {
+export function makeAttachmentToken(env, { uid, aid, sstamp = '-', ttl = ATT_TTL_SEC }) {
   const exp = Math.floor(Date.now() / 1000) + ttl;
-  const payload = Buffer.from(`${uid}:${aid}:${exp}`).toString('base64url');
+  // sstamp 绑进票据：改密/踢设备/轮换之后，已签发的附件链接也立刻失效
+  const payload = Buffer.from(`${uid}:${aid}:${exp}:${sstamp}`).toString('base64url');
   const sig = createHmac('sha256', secret(env, 'JWT_SECRET')).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -123,10 +124,10 @@ export function verifyAttachmentToken(env, token) {
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
 
   const decoded = Buffer.from(payload, 'base64url').toString('utf8');
-  const [uid, aid, expStr] = decoded.split(':');
+  const [uid, aid, expStr, sstamp] = decoded.split(':');
   if (!uid || !aid || !expStr) return null;
   if (Number(expStr) < Math.floor(Date.now() / 1000)) return null;
-  return { uid, aid };
+  return { uid, aid, sstamp: sstamp ?? '-' };
 }
 
 export const deviceTypeName = (t) =>

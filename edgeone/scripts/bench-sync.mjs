@@ -13,7 +13,6 @@ const env = {
   JWT_REFRESH_SECRET: 'bench-refresh-secret-0123456789abcd',
   PASSWORD_ITERATIONS: '100000',
   STORE_DRIVER: 'memory',
-  MAIL_ENABLED: 'false',
 };
 
 const call = async (method, path, { body, form, token } = {}) => {

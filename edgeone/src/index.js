@@ -67,14 +67,29 @@ app.use('*', async (c, next) => {
     return c.json({ error: 'invalid path' }, 400);
   }
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
-    const len = Number(c.req.header('content-length') ?? 0);
     const ct = (c.req.header('content-type') || '').toLowerCase();
     const binary = ct.includes('application/octet-stream') || ct.includes('multipart/form-data');
-    if (!binary && len > BODY_MAX_BYTES) {
-      return c.json({ error: 'payload too large', limit: BODY_MAX_BYTES }, 413);
+    // 文本类请求体整块读进来量真实字节数：只信 Content-Length 会被 chunked 绕过，
+    // 而伪造的 Content-Length 会让后面的解析抛错。
+    if (!binary) {
+      const text = await c.req.text();
+      if (Buffer.byteLength(text, 'utf8') > BODY_MAX_BYTES) {
+        return c.json({ error: 'payload too large', limit: BODY_MAX_BYTES }, 413);
+      }
+      c.set('rawBodyText', text);
     }
   }
   await next();
+});
+
+// 统一错误出口：未捕获异常不能再落到框架默认的 text/plain "Internal Server Error"，
+// 也不该把 PreconditionFailed（并发写冲突）当成 500。
+app.onError((err, c) => {
+  const isConflict = err?.name === 'PreconditionFailed';
+  const status = Number(err?.status) || (isConflict ? 409 : 500);
+  if (status >= 500) console.error('[error]', c.req.method, c.req.path, err?.stack || err);
+  const message = status >= 500 ? 'Internal Server Error' : isConflict ? 'resource already exists' : err?.message || 'bad request';
+  return c.json({ error: message, message, statusCode: status }, status);
 });
 
 // 安全响应头：下载 URL 里带票据，Referer 一律不带出去；同时禁止 MIME 嗅探
@@ -119,9 +134,42 @@ async function consumeToken(store, token, { maxUses = 5, ttlSec = 900 } = {}) {
 }
 
 // ---------------------------------------------------------------- helpers
+// 请求体读取：文本类（JSON / 表单）在中间件里整块读入并缓存，顺便量真实字节数。
+// 不能只看 Content-Length —— chunked 请求没有它，伪造/畸形的值也不可信。
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function body(c) {
+  const cached = c.get('rawBodyText');
+  if (cached !== undefined) {
+    const ct = (c.req.header('content-type') || '').toLowerCase();
+    if (ct.includes('application/json')) {
+      if (!cached.trim()) return {};
+      try {
+        return JSON.parse(cached) ?? {};
+      } catch {
+        // 以前这里 .catch(() => ({})) 会把坏 JSON 吞成 {}，让请求以空对象继续落库
+        throw new HttpError(400, 'invalid json body');
+      }
+    }
+    const out = {};
+    for (const [k, v] of new URLSearchParams(cached)) out[k] = v;
+    return out;
+  }
   const ct = c.req.header('content-type') || '';
-  if (ct.includes('application/json')) return (await c.req.json().catch(() => ({}))) ?? {};
+  if (ct.includes('application/json')) {
+    const text = await c.req.text();
+    if (!text.trim()) return {};
+    try {
+      return JSON.parse(text) ?? {};
+    } catch {
+      throw new HttpError(400, 'invalid json body');
+    }
+  }
   return (await c.req.parseBody().catch(() => ({}))) ?? {};
 }
 
@@ -259,6 +307,7 @@ async function requireAuth(c) {
       console.warn('[auth] stamp mismatch', c.req.method, c.req.path, 'sub=' + claims.sub, 'profile=' + Boolean(prof));
       return { error: c.json({ error: 'unauthorized', reason: 'stamp_mismatch' }, 401) };
     }
+    c.set('sstamp', prof.value.securityStamp);
     return { claims, user: prof.value, token: m[1] };
   } catch (e) {
     console.warn('[auth] token rejected:', c.req.method, c.req.path, e?.code || e?.message || e);
@@ -595,8 +644,12 @@ app.post('/identity/connect/token', async (c) => {
       findUserByEmail(c, email),
     ]);
     if (rl.blocked) return rl.blocked;
-    if (!user) return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
-
+    if (!user) {
+      // 时序侧信道：未知邮箱原本立刻返回（0 ms），已注册账号要跑一次 PBKDF2（~75 ms），
+      // 这就等于一个账号枚举器。这里对未知账号也做一次同等代价的哈希，让两者无法区分。
+      await hashPassword(String(p.password ?? ''), 'warden-timing-equalizer-salt', pbkdf2Iterations(c)).catch(() => {});
+      return c.json({ error: 'invalid_grant', error_description: 'Username or password is incorrect. Try again.', message: 'Username or password is incorrect. Try again.', Message: 'Username or password is incorrect. Try again.', statusCode: 400, validationErrors: { '': ['Username or password is incorrect. Try again.'] } }, 400);
+    }
     // login with deviceassword  access code
 const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
     if (authRequestId) {
@@ -826,7 +879,7 @@ app.get('/api/sync', async (c) => {
     ciphers: ciphers.map((row) =>
       cipherToJson(
         row,
-        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env)),
+        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get('sstamp') ?? '-')),
       ),
     ),
     domains: { equivalentDomains: [], globalEquivalentDomains: [], object: 'domains' },
@@ -942,7 +995,7 @@ app.get('/api/ciphers', async (c) => {
       .map((row) =>
         cipherToJson(
           row,
-          (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env)),
+          (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get('sstamp') ?? '-')),
         ),
       ),
     object: 'list',
@@ -1051,7 +1104,7 @@ async function cipherWithAttachments(c, store, uid, row) {
   const attMap = await loadAttachmentsByCipher(store, uid);
   return cipherToJson(
     row,
-    (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env)),
+    (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get('sstamp') ?? '-')),
   );
 }
 
@@ -1069,6 +1122,8 @@ async function createCipher(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const src = p.cipher ?? p;
+  // id 会直接拼进存储键（u/{uid}/ciphers/{id}.json），客户端自报的 id 必须是安全字符
+  if (!validId(src.id)) return c.json({ error: 'invalid id' }, 400);
   const now = nowIso();
   const row = {
     id: String(src.id ?? newId()),
@@ -1630,8 +1685,8 @@ async function loadAttachmentsByCipher(store, uid) {
   return map;
 }
 
-function attachmentToResponse(meta, base, env) {
-  const token = makeAttachmentToken(env, { uid: meta.userId, aid: meta.id });
+function attachmentToResponse(meta, base, env, sstamp = '-') {
+  const token = makeAttachmentToken(env, { uid: meta.userId, aid: meta.id, sstamp });
   const url = `${base}/api/ciphers/${meta.cipherId}/attachment/${meta.id}/download?token=${encodeURIComponent(
     token,
   )}`;
@@ -1725,7 +1780,7 @@ app.post('/api/ciphers/:id/attachment/v2', async (c) => {
   // cipherResponse 两个字段（缺任何一个就抛 MissingFieldException），
   // 而且它会把 cipherResponse 直接渲染出来 —— 所以这里要把刚建的附件一并放进 cipher。
   const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
-  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
+  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get('sstamp') ?? '-'));
   const touched = await mutate(store, keys.cipher(a.claims.sub, cipherId), (cur) =>
     cur ? { ...cur, updatedAt: nowIso() } : undefined,
   );
@@ -1800,7 +1855,7 @@ app.get('/api/ciphers/:id/attachment/:aid', async (c) => {
   const store = getStore(c.env);
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, c.req.param('aid'))))?.value;
   if (!meta || meta.cipherId !== c.req.param('id')) return c.json({ error: 'not found' }, 404);
-  return c.json(attachmentToResponse(meta, baseUrlOf(c), c.env));
+  return c.json(attachmentToResponse(meta, baseUrlOf(c), c.env, c.get('sstamp') ?? '-'));
 });
 
 app.get('/api/ciphers/:id/attachment/:aid/download', async (c) => {
@@ -1820,6 +1875,7 @@ let uid;
     if (!att) return c.json({ error: 'invalid attachment token' }, 401);
     uid = att.uid;
     aid = att.aid;
+    claimsStamp = att.sstamp ?? '-';
   } else {
     try {
       const claims = await verifyAccess(c.env, token);
@@ -1833,9 +1889,9 @@ let uid;
 
   const store = getStore(c.env);
 
-  // 用 access token 下载时同样要过 securityStamp：否则改密/踢设备/轮换之后
-  // /api/sync 已经 401，旧 token 却还能把附件整个拉走。
-  if (claimsStamp !== null || token.split('.').length !== 2) {
+  // 两条路径都要过 securityStamp：否则改密/踢设备/轮换之后 /api/sync 已经 401，
+  // 旧的 access token 或已签发的附件票据却还能把附件整个拉走。
+  {
     const prof = (await store.get(keys.profile(uid)))?.value;
     if (!prof || !safeEqual(prof.securityStamp, claimsStamp)) {
       return c.json({ error: 'unauthorized' }, 401);
@@ -2832,6 +2888,9 @@ app.get('/api/auth-requests/:id', async (c) => {
 app.put('/api/auth-requests/:id', async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
+  // 批准/拒绝时要比对客户端给的 accessCode，错太多次要限流，避免被用来暴力猜
+  const rl = await limit(c, 'auth-request-approve', a.claims.sub, 20, 60);
+  if (rl) return rl;
   const p = await body(c);
   if (a.claims.device !== String(p.deviceIdentifier ?? '')) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);

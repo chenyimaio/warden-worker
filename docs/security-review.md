@@ -83,6 +83,29 @@
 1. **`requestIp` 的信任边界**：不依赖平台文档无法确定哪个头是"平台注入、客户端不可写"。当前实现是"平台专有头优先 → `x-real-ip` → XFF 最后一跳"，比取第一个元素安全得多，但如果 EdgeOne 只是透传 `X-Forwarded-For`，仍可伪造。**建议**：部署后抓一次真实请求头，确认后把 `PLATFORM_IP_HEADERS` 收敛成唯一那个。
 2. **`prelogin` 的账号存在性**：协议决定的（客户端要拿 KDF 参数），只能靠限流。
 
+---
+
+## 十、第三轮审计复核结果
+
+同样先复现再动手。测试值：修前 / 修后。
+
+| 编号 | 复现结果 | 处置 |
+|---|---|---|
+| M-1 登录时序枚举 | **成立**：存在账号 72–76 ms，不存在 0–3 ms | 未知邮箱也跑一次同等代价的 PBKDF2（固定 dummy salt）。修后两边都是 **13–14 ms**，无法区分 |
+| M-2 4 MiB 守卫 fail-open | **成立**：chunked 5 MiB → `200` | 不再信任 `Content-Length`：文本类请求体整块读入并按真实字节数判定。修后 chunked 与带 CL 都是 **413**；`CL: abc` 不再引发解析异常 |
+| M-3 prelogin 真实 KDF | 成立（上轮已承认） | 协议决定，只能限流；见第九节"未能根治" |
+| M-4 cipher body id 未校验 | **成立**：`{"id":"../../profile"}` / `{"id":"a/b"}` 均 `200` | `createCipher` 加 `validId`。修后两者都是 **400** |
+| M-5 无全局 onError | **成立**：重复 id → `500 text/plain` | 新增 `app.onError`，`PreconditionFailed` 映射 **409 + JSON**（与其它 API 一致） |
+| L-1 2 段式附件票据不绑 sstamp | **成立**：改密后旧票据仍 `200` | 票据里加入 `sstamp`，下载时与 profile 比对。修后 **401** |
+| L-2 坏 JSON 被吞并落库 | **成立**：`{bad json` → `200` 且生成垃圾条目 | `body()` 改为抛 `HttpError(400)`，由 `onError` 统一返回 |
+| L-3 auth-request 响应端点无限流 | 成立 | 加 20/min/账号 |
+| L-4 IP 限流仍以可伪造头为键 | 成立（依赖平台头未知） | **未根治**，同第九节第 1 条 |
+| L-5 文档/脚本漂移 | 成立 | `ATTACHMENT_MAX_BYTES`→`UPLOAD_MAX_BYTES`；README 137→157；删除引用不存在构建产物的 `scripts/test-entry.mjs`；`bench-sync` 去掉已废弃的 `MAIL_ENABLED` |
+| L-6 bundle 入库 / Rust 目录硬编码 workers.dev | 成立 | bundle 保留（同第九节说明）；Rust/Cloudflare 部分属于另一条产品线，未在本次范围内改动 |
+
+新增回归（smoke 第 30 节）：chunked 5 MiB → 413、body id 穿越 → 400、重复 id → 409 JSON、坏 JSON → 400、附件票据改密后失效。
+
+
 
 回归用例已加入 `scripts/smoke.mjs`（第 27、28 节）：带密码文件 Send 的匿名/错误密码/带票据三条路径，以及"只凭 token 改密被拒""网页版结构改密成功且新密码可登录"。
 

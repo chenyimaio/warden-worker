@@ -901,6 +901,90 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('超限 Send 没有留下记录', !(after.data?.data ?? []).some((x) => x.name === 'too-big'), after);
 }
 
+// 30. 安全回归（第三轮审计）：请求体上限 / body id / 重复 id / 坏 JSON / 附件票据绑 stamp
+{
+  // 只信 Content-Length 时 chunked 请求可以绕过 4 MiB 上限
+  const big = 'z'.repeat(5 * 1024 * 1024);
+  const stream = new ReadableStream({
+    start(ctrl) {
+      ctrl.enqueue(new TextEncoder().encode(`{"name":"${big}"}`));
+      ctrl.close();
+    },
+  });
+  const res = await app.fetch(
+    new Request('http://localhost/api/ciphers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${secAccess}` },
+      body: stream,
+      duplex: 'half',
+    }),
+    env,
+  );
+  check('chunked 5 MiB JSON -> 413', res.status === 413, res.status);
+}
+
+{
+  // 用新密码登录（第 28 节改过）
+  const tok = (await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: secEmail, password: 'sec-mph-2', scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'sec-dev-4', deviceName: 'sec',
+    },
+  })).data?.access_token;
+
+  r = await call('POST', '/api/ciphers', { token: tok, body: { id: '../../profile', type: 1, name: 'trav', login: {} } });
+  check('cipher body id=../../profile -> 400', r.status === 400, r);
+  r = await call('POST', '/api/ciphers', { token: tok, body: { id: 'a/b', type: 1, name: 'trav', login: {} } });
+  check('cipher body id=a/b -> 400', r.status === 400, r);
+
+  r = await call('POST', '/api/ciphers', { token: tok, body: { id: 'dup-smoke', type: 1, name: 'd1', login: {} } });
+  check('自定义 id 创建 -> 200', r.status === 200, r);
+  r = await call('POST', '/api/ciphers', { token: tok, body: { id: 'dup-smoke', type: 1, name: 'd2', login: {} } });
+  check('重复 id -> 409 且是 JSON', r.status === 409 && typeof r.data === 'object', r);
+
+  // 坏 JSON：直接用 fetch 构造（call() 的 raw 分支会强制 octet-stream）
+  const badRes = await app.fetch(
+    new Request('http://localhost/api/ciphers', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tok}` },
+      body: '{bad json',
+    }),
+    env,
+  );
+  check('坏 JSON -> 400（不再吞成空对象落库）', badRes.status === 400, badRes.status);
+
+  // 附件票据绑 securityStamp：改密后旧票据失效
+  const email5 = `tok-${Date.now()}@example.com`;
+  await call('POST', '/api/accounts/register', {
+    body: {
+      email: email5, masterPasswordHash: 'tok-mph', userSymmetricKey: '2.k|iv|ct',
+      userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+    },
+  });
+  const t5 = (await call('POST', '/identity/connect/token', {
+    form: {
+      grant_type: 'password', username: email5, password: 'tok-mph', scope: 'api offline_access',
+      client_id: 'web', deviceType: '10', deviceIdentifier: 'tok-dev', deviceName: 'tok',
+    },
+  })).data?.access_token;
+  r = await call('POST', '/api/ciphers', { token: t5, body: { type: 2, name: '2.n', notes: '2.no', secureNote: { type: 0 } } });
+  const cid5 = r.data?.id;
+  r = await call('POST', `/api/ciphers/${cid5}/attachment/v2`, { token: t5, body: { key: '2.ak', fileName: 'a.bin', fileSize: 4 } });
+  const aid5 = r.data?.attachmentId;
+  await call('POST', `/api/ciphers/${cid5}/attachment/${aid5}`, { token: t5, raw: Buffer.from('DATA') });
+  r = await call('GET', `/api/ciphers/${cid5}`, { token: t5 });
+  const attUrl = r.data?.attachments?.[0]?.url ?? '';
+  const u5 = new URL(attUrl, 'http://localhost');
+  const ok5 = await call('GET', u5.pathname + u5.search);
+  check('2 段式附件票据改密前可用', ok5.status === 200, ok5);
+  await call('POST', '/api/accounts/password', {
+    token: t5,
+    body: { masterPasswordHash: 'tok-mph', newMasterPasswordHash: 'tok-mph-2', key: '2.k2|iv|ct' },
+  });
+  const dead5 = await call('GET', u5.pathname + u5.search);
+  check('改密后同一附件票据 -> 401', dead5.status === 401, dead5);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {

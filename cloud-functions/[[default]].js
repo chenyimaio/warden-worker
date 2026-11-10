@@ -14591,9 +14591,9 @@ async function verifyRemember(env, token) {
   return res;
 }
 var ATT_TTL_SEC = 600;
-function makeAttachmentToken(env, { uid, aid, ttl = ATT_TTL_SEC }) {
+function makeAttachmentToken(env, { uid, aid, sstamp = "-", ttl = ATT_TTL_SEC }) {
   const exp = Math.floor(Date.now() / 1e3) + ttl;
-  const payload = Buffer.from(`${uid}:${aid}:${exp}`).toString("base64url");
+  const payload = Buffer.from(`${uid}:${aid}:${exp}:${sstamp}`).toString("base64url");
   const sig = createHmac2("sha256", secret(env, "JWT_SECRET")).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -14606,10 +14606,10 @@ function verifyAttachmentToken(env, token) {
   const b = Buffer.from(expect);
   if (a.length !== b.length || !timingSafeEqual2(a, b)) return null;
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
-  const [uid, aid, expStr] = decoded.split(":");
+  const [uid, aid, expStr, sstamp] = decoded.split(":");
   if (!uid || !aid || !expStr) return null;
   if (Number(expStr) < Math.floor(Date.now() / 1e3)) return null;
-  return { uid, aid };
+  return { uid, aid, sstamp: sstamp ?? "-" };
 }
 var deviceTypeName = (t) => ({
   0: "Android",
@@ -15104,14 +15104,24 @@ app.use("*", async (c, next) => {
     return c.json({ error: "invalid path" }, 400);
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
-    const len = Number(c.req.header("content-length") ?? 0);
     const ct = (c.req.header("content-type") || "").toLowerCase();
     const binary = ct.includes("application/octet-stream") || ct.includes("multipart/form-data");
-    if (!binary && len > BODY_MAX_BYTES) {
-      return c.json({ error: "payload too large", limit: BODY_MAX_BYTES }, 413);
+    if (!binary) {
+      const text = await c.req.text();
+      if (Buffer.byteLength(text, "utf8") > BODY_MAX_BYTES) {
+        return c.json({ error: "payload too large", limit: BODY_MAX_BYTES }, 413);
+      }
+      c.set("rawBodyText", text);
     }
   }
   await next();
+});
+app.onError((err, c) => {
+  const isConflict = err?.name === "PreconditionFailed";
+  const status = Number(err?.status) || (isConflict ? 409 : 500);
+  if (status >= 500) console.error("[error]", c.req.method, c.req.path, err?.stack || err);
+  const message2 = status >= 500 ? "Internal Server Error" : isConflict ? "resource already exists" : err?.message || "bad request";
+  return c.json({ error: message2, message: message2, statusCode: status }, status);
 });
 app.use("*", async (c, next) => {
   await next();
@@ -15145,9 +15155,38 @@ async function consumeToken(store, token, { maxUses = 5, ttlSec = 900 } = {}) {
   }
   return true;
 }
+var HttpError = class extends Error {
+  constructor(status, message2) {
+    super(message2);
+    this.status = status;
+  }
+};
 async function body(c) {
+  const cached = c.get("rawBodyText");
+  if (cached !== void 0) {
+    const ct2 = (c.req.header("content-type") || "").toLowerCase();
+    if (ct2.includes("application/json")) {
+      if (!cached.trim()) return {};
+      try {
+        return JSON.parse(cached) ?? {};
+      } catch {
+        throw new HttpError(400, "invalid json body");
+      }
+    }
+    const out = {};
+    for (const [k, v] of new URLSearchParams(cached)) out[k] = v;
+    return out;
+  }
   const ct = c.req.header("content-type") || "";
-  if (ct.includes("application/json")) return await c.req.json().catch(() => ({})) ?? {};
+  if (ct.includes("application/json")) {
+    const text = await c.req.text();
+    if (!text.trim()) return {};
+    try {
+      return JSON.parse(text) ?? {};
+    } catch {
+      throw new HttpError(400, "invalid json body");
+    }
+  }
   return await c.req.parseBody().catch(() => ({})) ?? {};
 }
 function globToRe(pat) {
@@ -15252,6 +15291,7 @@ async function requireAuth(c) {
       console.warn("[auth] stamp mismatch", c.req.method, c.req.path, "sub=" + claims.sub, "profile=" + Boolean(prof));
       return { error: c.json({ error: "unauthorized", reason: "stamp_mismatch" }, 401) };
     }
+    c.set("sstamp", prof.value.securityStamp);
     return { claims, user: prof.value, token: m[1] };
   } catch (e) {
     console.warn("[auth] token rejected:", c.req.method, c.req.path, e?.code || e?.message || e);
@@ -15541,7 +15581,11 @@ app.post("/identity/connect/token", async (c) => {
       findUserByEmail(c, email)
     ]);
     if (rl.blocked) return rl.blocked;
-    if (!user) return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
+    if (!user) {
+      await hashPassword(String(p.password ?? ""), "warden-timing-equalizer-salt", pbkdf2Iterations(c)).catch(() => {
+      });
+      return c.json({ error: "invalid_grant", error_description: "Username or password is incorrect. Try again.", message: "Username or password is incorrect. Try again.", Message: "Username or password is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or password is incorrect. Try again."] } }, 400);
+    }
     const authRequestId = String(p.authrequest ?? p.authRequest ?? "");
     if (authRequestId) {
       const ar = (await store.get(keys.authRequest(user.id, authRequestId)))?.value;
@@ -15744,7 +15788,7 @@ app.get("/api/sync", async (c) => {
     ciphers: ciphers.map(
       (row) => cipherToJson(
         row,
-        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env))
+        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get("sstamp") ?? "-"))
       )
     ),
     domains: { equivalentDomains: [], globalEquivalentDomains: [], object: "domains" },
@@ -15849,7 +15893,7 @@ app.get("/api/ciphers", async (c) => {
     data: rows.filter(Boolean).map(
       (row) => cipherToJson(
         row,
-        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env))
+        (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get("sstamp") ?? "-"))
       )
     ),
     object: "list",
@@ -15946,7 +15990,7 @@ async function cipherWithAttachments(c, store, uid, row) {
   const attMap = await loadAttachmentsByCipher(store, uid);
   return cipherToJson(
     row,
-    (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env))
+    (attMap.get(row.id) ?? []).map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get("sstamp") ?? "-"))
   );
 }
 app.get("/api/ciphers/:id", async (c) => {
@@ -15962,6 +16006,7 @@ async function createCipher(c) {
   if (a.error) return a.error;
   const p = await body(c);
   const src = p.cipher ?? p;
+  if (!validId(src.id)) return c.json({ error: "invalid id" }, 400);
   const now = nowIso();
   const row = {
     id: String(src.id ?? newId()),
@@ -16432,8 +16477,8 @@ async function loadAttachmentsByCipher(store, uid) {
   }
   return map;
 }
-function attachmentToResponse(meta, base, env) {
-  const token = makeAttachmentToken(env, { uid: meta.userId, aid: meta.id });
+function attachmentToResponse(meta, base, env, sstamp = "-") {
+  const token = makeAttachmentToken(env, { uid: meta.userId, aid: meta.id, sstamp });
   const url = `${base}/api/ciphers/${meta.cipherId}/attachment/${meta.id}/download?token=${encodeURIComponent(
     token
   )}`;
@@ -16505,7 +16550,7 @@ app.post("/api/ciphers/:id/attachment/v2", async (c) => {
   };
   await store.put(keys.attachmentMeta(a.claims.sub, id), meta, { ifNoneMatch: "*" });
   const metas = (await loadAttachmentsByCipher(store, a.claims.sub)).get(cipherId) ?? [];
-  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env));
+  const attachments = metas.map((m) => attachmentToResponse(m, baseUrlOf(c), c.env, c.get("sstamp") ?? "-"));
   const touched = await mutate(
     store,
     keys.cipher(a.claims.sub, cipherId),
@@ -16569,7 +16614,7 @@ app.get("/api/ciphers/:id/attachment/:aid", async (c) => {
   const store = getStore2(c.env);
   const meta = (await store.get(keys.attachmentMeta(a.claims.sub, c.req.param("aid"))))?.value;
   if (!meta || meta.cipherId !== c.req.param("id")) return c.json({ error: "not found" }, 404);
-  return c.json(attachmentToResponse(meta, baseUrlOf(c), c.env));
+  return c.json(attachmentToResponse(meta, baseUrlOf(c), c.env, c.get("sstamp") ?? "-"));
 });
 app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
   const rl = await limit(c, "att-download", requestIp(c), 120, 60);
@@ -16585,6 +16630,7 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
     if (!att) return c.json({ error: "invalid attachment token" }, 401);
     uid = att.uid;
     aid = att.aid;
+    claimsStamp = att.sstamp ?? "-";
   } else {
     try {
       const claims = await verifyAccess(c.env, token);
@@ -16596,7 +16642,7 @@ app.get("/api/ciphers/:id/attachment/:aid/download", async (c) => {
     }
   }
   const store = getStore2(c.env);
-  if (claimsStamp !== null || token.split(".").length !== 2) {
+  {
     const prof = (await store.get(keys.profile(uid)))?.value;
     if (!prof || !safeEqual(prof.securityStamp, claimsStamp)) {
       return c.json({ error: "unauthorized" }, 401);
@@ -17429,6 +17475,8 @@ app.get("/api/auth-requests/:id", async (c) => {
 app.put("/api/auth-requests/:id", async (c) => {
   const a = await requireAuth(c);
   if (a.error) return a.error;
+  const rl = await limit(c, "auth-request-approve", a.claims.sub, 20, 60);
+  if (rl) return rl;
   const p = await body(c);
   if (a.claims.device !== String(p.deviceIdentifier ?? "")) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
