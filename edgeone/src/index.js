@@ -2178,10 +2178,14 @@ async function checkSendPassword(s, candidate) {
 // send.failedAttempts 仍然记录，供属主判断"这条链接正在被爆破"。
 const SEND_PW_MAX_FAILS_PER_MIN = 10;
 const SEND_PW_SUSPICIOUS_AFTER = 5;
-// 单条 Send 的累计失败软上限：到线后错误口令直接 429 并给 Retry-After。
+// 单条 Send 的累计失败软上限：到线后进入一段**有明确终点**的冷却期。
 // 这里**绝不能 sleep** —— 平台单实例并发只有 20，每个请求睡 600ms 等于把
 // 「CPU 爆破」换成「并发槽耗尽」：33 req/s 就能让整个实例排队。
-// 立即返回才能让请求马上释放槽位。
+// 立即返回 429 才能让请求马上释放槽位。
+//
+// 冷却期必须会结束：早期版本只返回固定的 Retry-After: 60，而计数是累计的、
+// 永不回落，所以"等一分钟再试"是假话。现在把终点存在 cooldownUntil 里，
+// Retry-After 报的是真实剩余时间，到期后计数自动归零，链接自己恢复。
 // 正确口令走上面的分支，永远放行。
 const SEND_PW_SOFT_CAP = 50;
 const SEND_PW_COOLDOWN_SEC = 60;
@@ -2196,18 +2200,29 @@ async function verifySendPassword(c, store, send, candidate) {
   const now = Date.now();
   const windowMs = 60 * 1000;
 
+  // 冷却期内：错误口令直接拒绝，Retry-After 报真实剩余秒数。
+  // 冷却已过期则不再拦，计数在下面的失败分支里归零重来。
+  const cooldownUntil = Number(send.cooldownUntil ?? 0);
+  const cooling = cooldownUntil > now;
+
   const cur = (await store.get(bucketKey))?.value;
   const sameWindow = cur && now - cur.start < windowMs;
   if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
-    return { ok: false, throttled: true, status: 429, retryAfter: SEND_PW_COOLDOWN_SEC, error: 'Too many attempts. Try again later.' };
+    return {
+      ok: false,
+      throttled: true,
+      status: 429,
+      retryAfter: Math.max(1, Math.ceil((cur.start + windowMs - now) / 1000)),
+      error: 'Too many attempts. Try again later.',
+    };
   }
 
   if (await checkSendPassword(send, candidate)) {
-    // 正确口令：清掉这个 IP 的失败计数和 Send 上的累计
+    // 正确口令：清掉这个 IP 的失败计数、Send 上的累计和冷却
     if (cur) await store.del(bucketKey).catch(() => {});
-    if (Number(send.failedAttempts ?? 0) > 0) {
+    if (Number(send.failedAttempts ?? 0) > 0 || cooldownUntil) {
       await mutate(store, keys.send(send.userId, send.id), (x) =>
-        x ? { ...x, failedAttempts: 0, updatedAt: nowIso() } : undefined,
+        x ? { ...x, failedAttempts: 0, cooldownUntil: null, updatedAt: nowIso() } : undefined,
       ).catch(() => {});
     }
     return { ok: true };
@@ -2217,18 +2232,24 @@ async function verifySendPassword(c, store, send, candidate) {
   await store.put(bucketKey, { start, count: (sameWindow ? Number(cur.count ?? 0) : 0) + 1, exp: start + windowMs }).catch(
     () => {},
   );
-  const fails = Number(send.failedAttempts ?? 0) + 1;
+  // 冷却已过期的话，从 0 重新累计，否则这条链接会永远停在软上限
+  const base = cooling ? Number(send.failedAttempts ?? 0) : cooldownUntil && cooldownUntil <= now ? 0 : Number(send.failedAttempts ?? 0);
+  const fails = base + 1;
+  const nextCooldown = fails >= SEND_PW_SOFT_CAP ? now + SEND_PW_COOLDOWN_SEC * 1000 : null;
   await mutate(store, keys.send(send.userId, send.id), (x) =>
-    x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : undefined,
+    x ? { ...x, failedAttempts: fails, cooldownUntil: nextCooldown, updatedAt: nowIso() } : undefined,
   ).catch(() => {});
 
-  if (fails >= SEND_PW_SOFT_CAP) {
+  if (cooling || nextCooldown) {
     return {
       ok: false,
       coolingDown: true,
       status: 429,
-      retryAfter: SEND_PW_COOLDOWN_SEC,
-      error: 'Too many failed attempts on this link',
+      // 冷却期内报剩余时间；刚触发时报整个窗口 —— 两者都是真话
+      retryAfter: cooling
+        ? Math.max(1, Math.ceil((cooldownUntil - now) / 1000))
+        : SEND_PW_COOLDOWN_SEC,
+      error: 'Too many failed attempts on this link. Try again later.',
     };
   }
   return {
@@ -2276,6 +2297,9 @@ function sendToJson(s) {
     // 客户端不认这个字段，纯属诊断用 —— 否则链接"打不开"时属主完全无从判断。
     failedAttempts: Number(s.failedAttempts ?? 0),
     suspicious: Number(s.failedAttempts ?? 0) >= SEND_PW_SUSPICIOUS_AFTER,
+    // 冷却到什么时候（毫秒时间戳）。属主据此判断"链接现在打不开"是不是正在被爆破
+    cooldownUntil: s.cooldownUntil ?? null,
+    coolingDown: Number(s.cooldownUntil ?? 0) > Date.now(),
     object: 'send',
   };
 }

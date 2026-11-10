@@ -184,7 +184,11 @@ export class BlobStore {
   }
 
   async list(prefix) {
-    const res = await this.#store.list({ prefix, consistency: 'strong' });
+    // paginate 必须显式打开。SDK 当前默认就是 true（见 dist/index.js 里
+    // `e?.paginate!==!1` 配合 isTruncated 循环，每页 1000 条直到取完），
+    // 但这是"默认值"，一旦上游改动，密钥轮换的完整性校验就会因为拿到不完整的
+    // 列表而永远 400，轮换直接做不了。这里写死 true，把这个假设钉住。
+    const res = await this.#store.list({ prefix, consistency: 'strong', paginate: true });
     return (res?.blobs ?? []).map((b) => ({ key: b.key, etag: b.etag ?? null, size: 0 }));
   }
 

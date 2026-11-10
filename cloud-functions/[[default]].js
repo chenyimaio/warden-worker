@@ -14721,32 +14721,36 @@ var sealKeyCache = /* @__PURE__ */ new WeakMap();
 function deriveSealKey(secret2) {
   return createHash("sha256").update(`${SEAL_LABEL}:${secret2}`).digest();
 }
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function legacySealKey(env) {
   const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
   return base ? deriveSealKey(base) : null;
 }
-async function getSealKey(store, env) {
-  if (!store) throw new Error("getSealKey requires a store");
-  const cached = sealKeyCache.get(store);
-  if (cached) return cached;
-  let secret2 = null;
-  try {
-    const cur = (await store.get(SEAL_KEY_PATH))?.value;
-    if (cur?.secret) secret2 = String(cur.secret);
-  } catch {
+async function readSealSecret(store, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const cur = (await store.get(SEAL_KEY_PATH))?.value;
+      if (cur?.secret) return String(cur.secret);
+    } catch {
+    }
+    if (i < attempts - 1) await sleep(40 * (i + 1));
   }
+  return null;
+}
+async function getSealKey(store, env, { refresh = false } = {}) {
+  if (!store) throw new Error("getSealKey requires a store");
+  if (!refresh) {
+    const cached = sealKeyCache.get(store);
+    if (cached) return cached;
+  }
+  let secret2 = await readSealSecret(store);
   if (!secret2) {
     const candidate = randomBytes(32).toString("base64url");
     try {
       await store.put(SEAL_KEY_PATH, { secret: candidate, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
     } catch {
     }
-    try {
-      const after = (await store.get(SEAL_KEY_PATH))?.value;
-      if (after?.secret) secret2 = String(after.secret);
-    } catch {
-    }
-    if (!secret2) secret2 = candidate;
+    secret2 = await readSealSecret(store) ?? candidate;
   }
   const key = deriveSealKey(secret2);
   sealKeyCache.set(store, key);
@@ -14755,7 +14759,7 @@ async function getSealKey(store, env) {
 async function sealSecret(env, store, plaintext) {
   const text = String(plaintext ?? "");
   if (!text) return null;
-  const key = await getSealKey(store, env);
+  const key = await getSealKey(store, env, { refresh: true });
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ct = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
@@ -14779,6 +14783,14 @@ async function openSecret(env, store, stored) {
     const key = await getSealKey(store, env);
     return { ok: true, value: attempt(key), legacy: false };
   } catch {
+  }
+  if (store && sealKeyCache.has(store)) {
+    sealKeyCache.delete(store);
+    try {
+      const key = await getSealKey(store, env);
+      return { ok: true, value: attempt(key), legacy: false };
+    } catch {
+    }
   }
   const legacy = legacySealKey(env);
   if (legacy) {
@@ -14908,7 +14920,7 @@ var BlobStore = class {
     await this.#store.delete(key);
   }
   async list(prefix) {
-    const res = await this.#store.list({ prefix, consistency: "strong" });
+    const res = await this.#store.list({ prefix, consistency: "strong", paginate: true });
     return (res?.blobs ?? []).map((b) => ({ key: b.key, etag: b.etag ?? null, size: 0 }));
   }
   // 附件用二进制通道（不经过 JSON 序列化）
@@ -14946,7 +14958,7 @@ function getStore2(env) {
 }
 async function mutate(store, key, fn, { retries = 5 } = {}) {
   const conditional = store.supportsConditional !== false;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let attempt = 0; attempt < retries; attempt++) {
     const cur = await store.get(key);
     const next = fn(cur ? cur.value : null);
@@ -14957,14 +14969,14 @@ async function mutate(store, key, fn, { retries = 5 } = {}) {
         return next;
       } catch (e) {
         if (!(e instanceof PreconditionFailed)) throw e;
-        await sleep(20 * (attempt + 1));
+        await sleep2(20 * (attempt + 1));
         continue;
       }
     }
     await store.put(key, next);
     const check = await store.get(key);
     if (check && JSON.stringify(check.value) === JSON.stringify(next)) return next;
-    await sleep(20 * (attempt + 1));
+    await sleep2(20 * (attempt + 1));
   }
   throw new Error(`write conflict after ${retries} retries: ${key}`);
 }
@@ -16942,19 +16954,27 @@ async function verifySendPassword(c, store, send, candidate) {
   );
   const now = Date.now();
   const windowMs = 60 * 1e3;
+  const cooldownUntil = Number(send.cooldownUntil ?? 0);
+  const cooling = cooldownUntil > now;
   const cur = (await store.get(bucketKey))?.value;
   const sameWindow = cur && now - cur.start < windowMs;
   if (sameWindow && Number(cur.count ?? 0) >= SEND_PW_MAX_FAILS_PER_MIN) {
-    return { ok: false, throttled: true, status: 429, retryAfter: SEND_PW_COOLDOWN_SEC, error: "Too many attempts. Try again later." };
+    return {
+      ok: false,
+      throttled: true,
+      status: 429,
+      retryAfter: Math.max(1, Math.ceil((cur.start + windowMs - now) / 1e3)),
+      error: "Too many attempts. Try again later."
+    };
   }
   if (await checkSendPassword(send, candidate)) {
     if (cur) await store.del(bucketKey).catch(() => {
     });
-    if (Number(send.failedAttempts ?? 0) > 0) {
+    if (Number(send.failedAttempts ?? 0) > 0 || cooldownUntil) {
       await mutate(
         store,
         keys.send(send.userId, send.id),
-        (x) => x ? { ...x, failedAttempts: 0, updatedAt: nowIso() } : void 0
+        (x) => x ? { ...x, failedAttempts: 0, cooldownUntil: null, updatedAt: nowIso() } : void 0
       ).catch(() => {
       });
     }
@@ -16965,20 +16985,23 @@ async function verifySendPassword(c, store, send, candidate) {
     () => {
     }
   );
-  const fails = Number(send.failedAttempts ?? 0) + 1;
+  const base = cooling ? Number(send.failedAttempts ?? 0) : cooldownUntil && cooldownUntil <= now ? 0 : Number(send.failedAttempts ?? 0);
+  const fails = base + 1;
+  const nextCooldown = fails >= SEND_PW_SOFT_CAP ? now + SEND_PW_COOLDOWN_SEC * 1e3 : null;
   await mutate(
     store,
     keys.send(send.userId, send.id),
-    (x) => x ? { ...x, failedAttempts: fails, updatedAt: nowIso() } : void 0
+    (x) => x ? { ...x, failedAttempts: fails, cooldownUntil: nextCooldown, updatedAt: nowIso() } : void 0
   ).catch(() => {
   });
-  if (fails >= SEND_PW_SOFT_CAP) {
+  if (cooling || nextCooldown) {
     return {
       ok: false,
       coolingDown: true,
       status: 429,
-      retryAfter: SEND_PW_COOLDOWN_SEC,
-      error: "Too many failed attempts on this link"
+      // 冷却期内报剩余时间；刚触发时报整个窗口 —— 两者都是真话
+      retryAfter: cooling ? Math.max(1, Math.ceil((cooldownUntil - now) / 1e3)) : SEND_PW_COOLDOWN_SEC,
+      error: "Too many failed attempts on this link. Try again later."
     };
   }
   return {
@@ -17023,6 +17046,9 @@ function sendToJson(s) {
     // 客户端不认这个字段，纯属诊断用 —— 否则链接"打不开"时属主完全无从判断。
     failedAttempts: Number(s.failedAttempts ?? 0),
     suspicious: Number(s.failedAttempts ?? 0) >= SEND_PW_SUSPICIOUS_AFTER,
+    // 冷却到什么时候（毫秒时间戳）。属主据此判断"链接现在打不开"是不是正在被爆破
+    cooldownUntil: s.cooldownUntil ?? null,
+    coolingDown: Number(s.cooldownUntil ?? 0) > Date.now(),
     object: "send"
   };
 }

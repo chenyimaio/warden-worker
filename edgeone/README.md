@@ -104,6 +104,10 @@ docs/DEPLOY.md  部署与验收手册（含故障对照表）
 | `BLOB_PROJECT_ID` | 无 | 仅**外部脚本/CI** 需要（如 `scripts/blob-selftest.mjs`）；函数内自动鉴权 |
 | `BLOB_TOKEN` | 无 | 同上，控制台生成的 API Token |
 
+> ⚠️ **`sys/sealkey.json` 是部署期资产**：存储里这个对象保存着恢复码 / TOTP 密钥的加密密钥，
+> 首次运行时自动生成。**不要删除、不要替换** —— 删或换会让所有已存的恢复码永久失效
+> （用户只能靠 TOTP 登录后重新生成）。它不依赖任何环境变量，轮换 `JWT_SECRET` 不受影响。
+
 ### 4.3 账号与安全
 
 | 变量 | 默认 | 说明 |
@@ -207,7 +211,7 @@ curl -s -X POST localhost:8787/api/accounts/password-hint \
 
 | 命令 | 用途 |
 |---|---|
-| `npm run smoke` | 208 项契约测试（memory 存储） |
+| `npm run smoke` | 214 项契约测试（memory 存储） |
 | `npm run parity` | 与上游 Rust 路由做集合比对 |
 | `npm run test:blob` | Blob 适配器测试 |
 | `node scripts/test-upload.mjs` | multipart 解析测试 |

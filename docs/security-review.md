@@ -500,6 +500,116 @@ const key = await getSealKey(store, env);   // 按 store 实例缓存，不重�
 （日志、控制台 JSON 预览、导出、局部误读），不是「防整库沦陷」。
 两害相权，**可恢复性更重要**：恢复码失效意味着用户永久失去账号。
 
+---
+
+## 十九、N-7：seal 密钥在陈旧读下会分裂（我引入的）
+
+### 复现
+
+用可编排的假存储模拟 Blob 的最终一致（读返回 `null`，写却生效）：
+
+```
+[1] 两实例密钥一致: false (已分裂)
+[2] 用 B 的密钥解 A 封的数据: ok=false reason=sealed-secret-unreadable
+[3] 新实例 C 解 A 的数据:     ok=false
+后端最终密钥 = B 的（后写覆盖）
+```
+
+`getSealKey` 的「生成 → 写 → 回读一次」挡不住这个窗口：两个实例都读到 `null`，
+各写一份，各自回读到自己那份。那一刻诞生的一条数据，此后任何实例都解不开。
+
+### 修法（三处）
+
+```js
+// 1) 回读改成 3 次重试，把"恰好落在窗口里"的概率压到很低
+async function readSealSecret(store, attempts = 3) { ...await sleep(40 * (i + 1))... }
+
+// 2) 写路径强制绕过缓存：refresh=true。
+//    否则密钥文件被替换后，在线实例会用旧密钥继续封装新数据，
+//    而别的实例按存储里的新密钥去解 —— 解不开。写是稀有操作（2 个调用点），
+//    多一次存储读完全划算。
+const key = await getSealKey(store, env, { refresh: true });
+
+// 3) 解密失败时自愈：清缓存 → 重读 → 再试一次，之后才退到旧密钥
+if (store && sealKeyCache.has(store)) { sealKeyCache.delete(store); ...retry... }
+```
+
+### 实测
+
+```
+[1] 陈旧读后两实例一致:               ✅
+[2] 新实例解 A 的数据:                ✅
+[3] 替换后新写的数据别的实例能解:      ✅
+[4] 替换后旧数据: ok:false（密钥真的没了，属预期，但会明确报错而非静默）
+```
+
+### 定性
+
+`sys/sealkey.json` 是**部署期资产**：一旦存在就不该被替换或删除。
+换掉它等于让所有已存的恢复码永久失效（只能靠 TOTP 登录后重新生成）。
+这一点写进了代码注释、`.env.example` 和报告。
+
+---
+
+## 二十、L-21 再复核：SDK 确实自带分页
+
+上一轮判定为误报，本轮再确认一次，直接引用 SDK 实现（`@edgeone/pages-blob/dist/index.js`）：
+
+```js
+list(e){
+  let n = e?.paginate !== !1,            // paginate 默认 true
+      r = e?.limit, s = [], ...;
+  for (; d;) {
+    let g = Math.min(r !== void 0 ? r - s.length : 1e3, 1e3);
+    let u = await this.cosClient.listObjects(..., { marker: i, maxKeys: g, ... });
+    for (let f of u.contents) s.push({ key: f.key, etag: f.etag });
+    ...
+    else if (u.isTruncated) { ... i = u.nextMarker; }   // 继续下一页
+    else d = !1;
+  }
+}
+```
+
+即：默认每页 1000 条、`isTruncated` 为真就继续，直到取完。
+我们的 `BlobStore.list()` 只传 `{prefix, consistency}` 也在分页范围内。
+
+**但「默认值」是隐式依赖**：上游哪天把默认改成 `false`，
+密钥轮换的完整性校验就会因为拿到不完整列表而永远 400，轮换直接做不了。
+所以现在显式写死：
+
+```js
+const res = await this.#store.list({ prefix, consistency: 'strong', paginate: true });
+```
+
+把一个隐式假设变成一个显式契约，成本一行。
+
+---
+
+## 二十一、`Retry-After: 60` 语义修正
+
+上一轮软上限返回的是固定 `Retry-After: 60`，但计数是**累计**且永不回落的 ——
+"等一分钟再试"是假话，等多久都没用。
+
+现在冷却期有明确终点：
+
+```js
+const cooldownUntil = Number(send.cooldownUntil ?? 0);
+const cooling = cooldownUntil > now;
+// 触发时：写 cooldownUntil = now + 60s，报整个窗口
+// 冷却中：报真实剩余秒数
+// 到期后：计数归零重来，链接自己恢复
+```
+
+实测：冷却期内 429 且 `Retry-After` 在 1–60 之间；把 `cooldownUntil` 改成过去时间后，
+错误口令恢复成 401（不再永久 429），正确口令 200。
+
+### 429 对匿名访问的语义变化（需知）
+
+带口令的 Send，匿名访问现在可能收到 **429** 而不是 401。自研客户端如果只判断
+`status === 401` 来做"口令错误"提示，需要同时处理 429（读 `Retry-After`）。
+官方客户端不受影响：它把非 2xx 都当作失败展示。
+
+
 
 
 

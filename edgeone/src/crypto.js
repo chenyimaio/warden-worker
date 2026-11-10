@@ -251,6 +251,8 @@ function deriveSealKey(secret) {
   return createHash('sha256').update(`${SEAL_LABEL}:${secret}`).digest();
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // 旧实现直接拿 JWT_SECRET 派生。保留它只为了把已有数据迁移过来，不再用于新写入。
 function legacySealKey(env) {
   const base = env?.JWT_SECRET ?? process.env.JWT_SECRET;
@@ -258,39 +260,54 @@ function legacySealKey(env) {
 }
 
 /**
+ * 读 seal 密钥，带重试。
+ *
+ * Blob 是最终一致的：两个实例同时首次生成时，都会读到 null、各写一份、各自回读到自己那份，
+ * 于是同一时刻诞生的两条数据用了不同的密钥 —— 后写的那份赢，先写的永久解不开。
+ * 单次回读挡不住这个窗口，所以这里重试几次，把"恰好落在窗口里"的概率压下去。
+ */
+async function readSealSecret(store, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const cur = (await store.get(SEAL_KEY_PATH))?.value;
+      if (cur?.secret) return String(cur.secret);
+    } catch {
+      /* 读失败继续重试 */
+    }
+    if (i < attempts - 1) await sleep(40 * (i + 1));
+  }
+  return null;
+}
+
+/**
  * 取出（必要时创建）持久化的 seal 密钥。
  *
- * 并发首次创建：两个实例可能同时生成并写入，谁最后写谁生效。
- * 写入后统一回读，双方都用回读到的那把，不会出现"我加密用 A、他解密用 B"。
+ * sys/sealkey.json 是**部署期资产**：一旦存在就不该被替换或删除。
+ * 删掉或换掉它，等于让所有已存的恢复码永久失效。
+ *
+ * refresh=true 时强制绕过进程内缓存重读。**写路径必须用 refresh**：
+ * 缓存不失效意味着密钥文件被替换后，在线实例会继续用旧密钥封装新数据，
+ * 而别的实例按存储里的新密钥去解 —— 解不开。读路径可以吃缓存，
+ * 因为解不开时 openSecret 会自己清缓存重试。
  */
-export async function getSealKey(store, env) {
+export async function getSealKey(store, env, { refresh = false } = {}) {
   if (!store) throw new Error('getSealKey requires a store');
-  const cached = sealKeyCache.get(store);
-  if (cached) return cached;
-
-  let secret = null;
-  try {
-    const cur = (await store.get(SEAL_KEY_PATH))?.value;
-    if (cur?.secret) secret = String(cur.secret);
-  } catch {
-    /* 读不到就尝试创建 */
+  if (!refresh) {
+    const cached = sealKeyCache.get(store);
+    if (cached) return cached;
   }
+
+  let secret = await readSealSecret(store);
 
   if (!secret) {
     const candidate = randomBytes(32).toString('base64url');
     try {
       await store.put(SEAL_KEY_PATH, { secret: candidate, createdAt: new Date().toISOString() });
     } catch {
-      /* 已存在会被覆盖不影响：下面回读为准 */
+      /* 并发下可能已存在；以回读为准 */
     }
-    // 回读为准，避免并发下各用各的
-    try {
-      const after = (await store.get(SEAL_KEY_PATH))?.value;
-      if (after?.secret) secret = String(after.secret);
-    } catch {
-      /* 回读失败就先用候选值 */
-    }
-    if (!secret) secret = candidate;
+    // 回读重试：并发首次创建时靠它收敛到"最终落盘的那一份"
+    secret = (await readSealSecret(store)) ?? candidate;
   }
 
   const key = deriveSealKey(secret);
@@ -301,7 +318,8 @@ export async function getSealKey(store, env) {
 export async function sealSecret(env, store, plaintext) {
   const text = String(plaintext ?? '');
   if (!text) return null;
-  const key = await getSealKey(store, env);
+  // 写路径强制刷新：确保封下去的就是存储里当前那把密钥
+  const key = await getSealKey(store, env, { refresh: true });
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
@@ -315,8 +333,9 @@ export async function sealSecret(env, store, plaintext) {
  *   { ok: true,  value: null }  本来就没有值
  *   { ok: false, reason }       有密文但解不开 —— 调用方必须显式处理，不能当空值
  *
- * 解不开时先按旧密钥（JWT_SECRET 派生）再试一次，成功就顺手用新密钥重封，
- * 让升级前写入的数据自动迁移，不需要任何人工操作。
+ * 解不开时按顺序自愈：
+ *   1) 丢掉进程内缓存，重新读一次 sys/sealkey.json（覆盖"别的实例刚改了密钥"）
+ *   2) 再试旧密钥（JWT_SECRET 派生），成功就顺手用当前密钥重封，完成迁移
  */
 export async function openSecret(env, store, stored) {
   const raw = String(stored ?? '');
@@ -334,11 +353,23 @@ export async function openSecret(env, store, stored) {
     return Buffer.concat([d.update(ct), d.final()]).toString('utf8');
   };
 
+  // 第一次：用缓存/当前密钥
   try {
     const key = await getSealKey(store, env);
     return { ok: true, value: attempt(key), legacy: false };
   } catch {
-    /* 落到旧密钥重试 */
+    /* 进入自愈 */
+  }
+
+  // 自愈：缓存可能过期（密钥文件被替换 / 另一实例后写覆盖），丢掉重读再试
+  if (store && sealKeyCache.has(store)) {
+    sealKeyCache.delete(store);
+    try {
+      const key = await getSealKey(store, env);
+      return { ok: true, value: attempt(key), legacy: false };
+    } catch {
+      /* 继续退到旧密钥 */
+    }
   }
 
   const legacy = legacySealKey(env);

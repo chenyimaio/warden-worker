@@ -1396,6 +1396,102 @@ check('新密码可以登录（旧密码结构没被误写成新密码）', r.st
   check('历史明文原样返回', o5.ok && o5.value === 'PLAIN-HINT', o5);
 }
 
+// 36. N-7：seal 密钥在陈旧读/替换下的收敛与自愈；软上限冷却期必须真的会结束
+{
+  const { sealSecret, openSecret, getSealKey } = await import('../src/crypto.js');
+
+  // 模拟 Blob 最终一致：stale=true 时读不到刚写的值
+  class FakeBackend {
+    constructor() { this.m = new Map(); }
+    async get(k, stale) { if (stale) return null; return this.m.has(k) ? { value: this.m.get(k) } : null; }
+    async put(k, v) { this.m.set(k, v); }
+  }
+  const mkView = (be) => {
+    const ctx = { stale: false };
+    return { ctx, async get(k) { return be.get(k, ctx.stale); }, async put(k, v) { return be.put(k, v); } };
+  };
+
+  const be = new FakeBackend();
+  const viewA = mkView(be);
+  viewA.ctx.stale = true;                       // A 一开始全是陈旧读
+  const pending = getSealKey(viewA, { JWT_SECRET: 'n7-secret-0123456789abcdefghij' });
+  setTimeout(() => { viewA.ctx.stale = false; }, 30);
+  const keyA = await pending;
+  const keyB = await getSealKey(mkView(be), { JWT_SECRET: 'n7-secret-0123456789abcdefghij' });
+  check('N-7 陈旧读下两个实例最终收敛到同一把密钥', Buffer.compare(keyA, keyB) === 0);
+
+  // 写路径必须用存储里当前的密钥（缓存不能让它继续用旧的）
+  const be2 = new FakeBackend();
+  const cView = mkView(be2);
+  const envN7 = { JWT_SECRET: 'n7-secret-0123456789abcdefghij' };
+  await getSealKey(cView, envN7);
+  be2.m.set('sys/sealkey.json', { secret: 'n7-replaced-key-0123456789abcdef' });
+  const blobNew = await sealSecret(envN7, cView, 'AFTER-REPLACE');
+  const opened = await openSecret(envN7, mkView(be2), blobNew);
+  check('N-7 密钥文件被替换后，新写入的数据别的实例仍能解', opened.ok && opened.value === 'AFTER-REPLACE', opened);
+
+  // 软上限冷却期：到点后会自己结束，不能永久卡住
+  const { getStore, keys } = await import('../src/store.js');
+  const st = getStore(env);
+  const mkU = async (tag) => {
+    const addr = `${tag}-${Date.now()}@example.com`;
+    await call('POST', '/api/accounts/register', {
+      body: {
+        email: addr, masterPasswordHash: `${tag}-mph`, userSymmetricKey: '2.k|iv|ct',
+        userAsymmetricKeys: { encryptedPrivateKey: '2.p|iv|ct', publicKey: 'pub' }, kdf: 0, kdfIterations: 100000,
+      },
+    });
+    const r2 = await call('POST', '/identity/connect/token', {
+      form: {
+        grant_type: 'password', username: addr, password: `${tag}-mph`, scope: 'api offline_access',
+        client_id: 'web', deviceType: '10', deviceIdentifier: `dev-${tag}`, deviceName: tag,
+      },
+    });
+    return r2.data?.access_token;
+  };
+  const u2 = await mkU('n7');
+  const dstr = new Date(Date.now() + 86400e3).toISOString();
+  r = await call('POST', '/api/sends', {
+    token: u2,
+    body: { type: 0, key: 'k', name: 'cd', text: { text: 'x' }, deletionDate: dstr, password: 'right' },
+  });
+  const cdAccess = r.data?.accessId;
+
+  // 直接把这 60 次失败写进记录，省掉真实打点
+  const idx = (await st.get(keys.sendIndex(cdAccess)))?.value;
+  const sendRec = (await st.get(keys.send(idx.userId, idx.id))).value;
+  await st.put(keys.send(idx.userId, idx.id), {
+    ...sendRec,
+    failedAttempts: 60,
+    cooldownUntil: Date.now() + 60000,
+  });
+
+  r = await call('POST', `/api/sends/access/${cdAccess}`, {
+    body: { password: 'wrong' },
+    headers: { 'eo-connecting-ip': '10.6.6.6' },
+  });
+  check('冷却期内错误口令 -> 429', r.status === 429, r);
+  check('Retry-After 报的是真实剩余时间（≤60 且 >0）', (() => {
+    const v = Number(r.headers?.get?.('retry-after'));
+    return v > 0 && v <= 60;
+  })(), r.headers?.get?.('retry-after'));
+
+  // 把冷却改成已过期，计数应归零重来（不再永久 429）
+  const cur = (await st.get(keys.send(idx.userId, idx.id))).value;
+  await st.put(keys.send(idx.userId, idx.id), { ...cur, cooldownUntil: Date.now() - 1000 });
+  r = await call('POST', `/api/sends/access/${cdAccess}`, {
+    body: { password: 'wrong' },
+    headers: { 'eo-connecting-ip': '10.6.6.7' },
+  });
+  check('冷却过期后恢复普通失败语义（不再永久 429）', r.status === 401, r);
+
+  r = await call('POST', `/api/sends/access/${cdAccess}`, {
+    body: { password: 'right' },
+    headers: { 'eo-connecting-ip': '10.6.6.8' },
+  });
+  check('冷却过期后正确口令仍可访问', r.status === 200, r);
+}
+
 const failed = results.filter((x) => !x.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) {
