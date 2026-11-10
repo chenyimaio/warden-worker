@@ -15236,15 +15236,26 @@ async function sweepRateKeys(store, now) {
   } catch {
   }
 }
+var SHARED_RATE_BUCKET = "shared-untrusted-ip";
+var SHARED_RATE_FACTOR = 10;
+var SHARED_RATE_MIN = 120;
+function rateBucket(id, max) {
+  if (id != null && id !== "") return { id, max };
+  return {
+    id: SHARED_RATE_BUCKET,
+    max: Math.max(Number(max || 0) * SHARED_RATE_FACTOR, SHARED_RATE_MIN)
+  };
+}
 async function limit(c, kind, id, max, windowSec) {
+  const bucket = rateBucket(id, max);
   const store = getStore2(c.env);
-  const digest = createHash2("sha256").update(`${kind}:${id}`).digest("hex").slice(0, 32);
+  const digest = createHash2("sha256").update(`${kind}:${bucket.id}`).digest("hex").slice(0, 32);
   const key = keys.rate(`${kind}/${digest}`);
   const now = Date.now();
   const cur = (await store.get(key))?.value;
   const sameWindow = cur && now - cur.start < windowSec * 1e3;
   const count = sameWindow ? cur.count : 0;
-  if (count >= max) {
+  if (count >= bucket.max) {
     const retry = Math.max(1, Math.ceil((windowSec * 1e3 - (now - cur.start)) / 1e3));
     return c.json({ error: "Too many requests. Please try again later." }, 429, {
       "retry-after": String(retry)
@@ -15256,9 +15267,13 @@ async function limit(c, kind, id, max, windowSec) {
   return null;
 }
 async function limits(c, specs) {
+  const usable = specs.map((s) => {
+    const b = rateBucket(s.id, s.max);
+    return { ...s, id: b.id, max: b.max };
+  });
   const store = getStore2(c.env);
   const now = Date.now();
-  const entries = specs.map((s) => ({
+  const entries = usable.map((s) => ({
     spec: s,
     key: keys.rate(`${s.kind}/${createHash2("sha256").update(`${s.kind}:${s.id}`).digest("hex").slice(0, 32)}`)
   }));
@@ -15616,7 +15631,7 @@ app.post("/identity/connect/token", async (c) => {
       const ar = (await store.get(keys.authRequest(user.id, authRequestId)))?.value;
       const devId = String(p.device_identifier ?? p.deviceIdentifier ?? "");
       const devType = Number(p.device_type ?? p.deviceType ?? 14);
-      if (!ar || ar.approved !== 1 || ar.requestIp !== requestIp(c) || Number(ar.deviceType) !== devType || ar.requestDeviceIdentifier !== devId || !safeEqual(ar.accessCode, mph)) {
+      if (!ar || ar.approved !== 1 || ipMismatch(ar.requestIp, requestIp(c)) || Number(ar.deviceType) !== devType || ar.requestDeviceIdentifier !== devId || !safeEqual(ar.accessCode, mph)) {
         await timingFill;
         return c.json({ error: "invalid_grant", error_description: "Username or access code is incorrect. Try again.", message: "Username or access code is incorrect. Try again.", Message: "Username or access code is incorrect. Try again.", statusCode: 400, validationErrors: { "": ["Username or access code is incorrect. Try again."] } }, 400);
       }
@@ -17442,18 +17457,15 @@ async function importCiphers(c) {
   await touchUser(store, a.claims.sub);
   return c.json({ count, folders: folderIds.length }, 200);
 }
-var PLATFORM_IP_HEADERS = ["eo-connecting-ip", "cf-connecting-ip", "true-client-ip"];
+var PLATFORM_IP_HEADERS = ["eo-connecting-ip", "true-client-ip", "cf-connecting-ip"];
 var requestIp = (c) => {
   for (const h of PLATFORM_IP_HEADERS) {
     const v = (c.req.header(h) || "").trim();
     if (v) return v;
   }
-  const real = (c.req.header("x-real-ip") || "").trim();
-  if (real) return real;
-  const xff = (c.req.header("x-forwarded-for") || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (xff.length) return xff[xff.length - 1];
-  return "unknown";
+  return null;
 };
+var ipMismatch = (recorded, current) => Boolean(recorded) && Boolean(current) && String(recorded) !== String(current);
 var requestDeviceType = (c) => Number(c.req.header("device-type") ?? c.req.header("x-device-type") ?? 14) || 14;
 function authRequestToJson(ar, origin) {
   return {
@@ -17570,7 +17582,7 @@ app.get("/api/auth-requests/:id/response", async (c) => {
   const ar = (await store.get(keys.authRequest(hit.userId, hit.id)))?.value;
   if (!ar) return c.json({ error: "AuthRequest doesn't exist" }, 400);
   const code = String(c.req.query("code") ?? "");
-  if (Number(ar.deviceType) !== requestDeviceType(c) || ar.requestIp !== requestIp(c) || !safeEqual(ar.accessCode, code)) {
+  if (Number(ar.deviceType) !== requestDeviceType(c) || ipMismatch(ar.requestIp, requestIp(c)) || !safeEqual(ar.accessCode, code)) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
   }
   return c.json(authRequestToJson(ar, baseUrlOf(c)));

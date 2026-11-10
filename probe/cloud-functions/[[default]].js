@@ -1,15 +1,19 @@
-// EdgeOne Makers · 请求头探测器（单文件，零依赖，无需构建）
+// EdgeOne Makers - Request Header Probe
 //
-// 目的：确认平台到底注入了哪些请求头（尤其是客户端真实 IP），
-// 以及客户端自带的同名头会被「保留 / 覆盖 / 追加」成什么样。
+// Single file, zero dependencies, no build step. Pure ASCII on purpose:
+// non-ASCII text gets mangled when uploaded through an editor that assumes GBK.
 //
-// 路由：
-//   GET /        交互页面：展示当前头 + 一键对比测试
-//   GET /json    当前请求的完整头（给 curl / jq 用）
+// IMPORTANT: this file must be named [[default]].js inside cloud-functions/,
+// otherwise Makers only routes the filename to that one path and everything
+// else 404s at the platform level.
 //
-// 所有响应都是 no-store，避免 CDN 缓存把探测结果搅混。
+// Routing is deliberately forgiving: ANY path returns the page, and JSON is
+// served when the URL carries ?json=1 (or ends with /json or /echo). A probe
+// should never answer 404 just because the route did not line up.
+//
+// All responses are no-store so CDN caching cannot blur the results.
 
-// 常见的「客户端 IP」类头，按平台可能性排序
+// Headers that could carry the client IP, ordered by platform likelihood.
 const IP_CANDIDATES = [
   'eo-connecting-ip',
   'cf-connecting-ip',
@@ -32,13 +36,34 @@ const looksLikeIp = (name) =>
 
 function collectHeaders(request) {
   const out = {};
-  for (const [name, value] of request.headers) {
-    out[String(name).toLowerCase()] = value;
+  try {
+    for (const [name, value] of request.headers) {
+      out[String(name).toLowerCase()] = value;
+    }
+  } catch {
+    /* header iteration unavailable: return what we have */
   }
   return out;
 }
 
+// request.url is a full URL in most runtimes but may arrive relative here.
+// Never let URL parsing throw: a probe must always answer.
+function parseUrl(request) {
+  const raw = String(request?.url ?? '');
+  try {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return new URL(raw);
+  } catch {
+    /* fall through to the relative form */
+  }
+  try {
+    return new URL(raw || '/', 'http://placeholder.local');
+  } catch {
+    return new URL('http://placeholder.local/');
+  }
+}
+
 function snapshot(request) {
+  const url = parseUrl(request);
   const headers = collectHeaders(request);
   const ipLike = {};
   for (const [name, value] of Object.entries(headers)) {
@@ -46,16 +71,27 @@ function snapshot(request) {
   }
   return {
     ok: true,
-    method: request.method,
-    url: request.url,
+    method: request?.method ?? 'GET',
+    // surfaced so a routing mismatch is obvious at a glance
+    rawUrl: String(request?.url ?? ''),
+    path: url.pathname,
+    query: url.search,
     headerCount: Object.keys(headers).length,
     ipLike,
     headers,
     serverTime: new Date().toISOString(),
     runtime: process.version,
     region: process.env.TENCENTCLOUD_REGION ?? null,
-    envKeys: Object.keys(process.env).filter((k) => /EDGEONE|TENCENT|SCF|EO_/i.test(k)).sort(),
+    envKeys: Object.keys(process.env)
+      .filter((k) => /EDGEONE|TENCENT|SCF|EO_/i.test(k))
+      .sort(),
   };
+}
+
+function wantsJson(request, url) {
+  if (url.searchParams.has('json')) return true;
+  if (String(url.searchParams.get('format') ?? '').toLowerCase() === 'json') return true;
+  return /(^|\/)(json|echo)\/?$/i.test(url.pathname);
 }
 
 const JSON_HEADERS = {
@@ -75,11 +111,11 @@ const HTML_HEADERS = {
 };
 
 const PAGE = `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EdgeOne Makers · 请求头探测</title>
+<title>EdgeOne Makers - Request Header Probe</title>
 <style>
   :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
   @media (prefers-color-scheme: light){
@@ -106,7 +142,6 @@ const PAGE = `<!doctype html>
   button{cursor:pointer;font:inherit;font-size:13px;padding:7px 13px;border-radius:6px;
     border:1px solid var(--line);background:var(--bg);color:var(--fg)}
   button:hover{border-color:var(--acc);color:var(--acc)}
-  button:disabled{opacity:.5;cursor:default}
   .note{color:var(--dim);font-size:12.5px;margin:10px 0 0}
   .verdict{margin-top:14px;padding:12px;border-radius:6px;background:var(--bg);border:1px solid var(--line);font-size:13px}
   .verdict b{color:var(--acc)}
@@ -116,36 +151,43 @@ const PAGE = `<!doctype html>
 </head>
 <body>
 <div class="wrap">
-  <h1>EdgeOne Makers · 请求头探测</h1>
-  <div class="sub">用来确认平台注入了哪些头、客户端自带的同名头会不会被覆盖。全部响应 <code>no-store</code>。</div>
+  <h1>EdgeOne Makers - Request Header Probe</h1>
+  <div class="sub">Shows which headers the platform injects, and whether a client-supplied header is kept, overwritten or appended. Everything is <code>no-store</code>.</div>
 
   <section>
-    <h2>当前请求</h2>
-    <table id="cur"><tr><td class="muted">加载中…</td></tr></table>
+    <h2>Routing (sanity check)</h2>
+    <table id="route"><tr><td class="muted">loading...</td></tr></table>
+    <p class="note">If <code>path</code> above is not what you typed in the address bar, the function is mounted somewhere else and every route will misbehave.</p>
   </section>
 
   <section>
-    <h2>对比测试</h2>
+    <h2>Current request</h2>
+    <table id="cur"><tr><td class="muted">loading...</td></tr></table>
+  </section>
+
+  <section>
+    <h2>Comparison test</h2>
     <div class="btns">
-      <button data-h="">① 裸请求（不带自定义头）</button>
-      <button data-h="X-Forwarded-For: 9.9.9.9">② 带 X-Forwarded-For: 9.9.9.9</button>
-      <button data-h="X-Real-IP: 8.8.8.8">③ 带 X-Real-IP: 8.8.8.8</button>
-      <button data-h="EO-Connecting-IP: 7.7.7.7">④ 带 EO-Connecting-IP: 7.7.7.7</button>
-      <button data-h="True-Client-IP: 6.6.6.6">⑤ 带 True-Client-IP: 6.6.6.6</button>
+      <button data-h="">(1) Bare request</button>
+      <button data-h="X-Forwarded-For: 9.9.9.9">(2) X-Forwarded-For: 9.9.9.9</button>
+      <button data-h="X-Real-IP: 8.8.8.8">(3) X-Real-IP: 8.8.8.8</button>
+      <button data-h="EO-Connecting-IP: 7.7.7.7">(4) EO-Connecting-IP: 7.7.7.7</button>
+      <button data-h="True-Client-IP: 6.6.6.6">(5) True-Client-IP: 6.6.6.6</button>
     </div>
-    <table id="cmp"><tr><td class="muted">点一个按钮开始</td></tr></table>
-    <p class="note">浏览器不允许设置 <code>Host</code> / <code>Via</code> 等禁止头；这些用 <code>curl</code> 测更准（见下）。</p>
+    <table id="cmp"><tr><td class="muted">click a button above</td></tr></table>
+    <p class="note">Browsers refuse to set forbidden headers such as <code>Host</code> or <code>Via</code>; use <code>curl</code> for those (see below).</p>
     <div class="verdict" id="verdict" hidden></div>
   </section>
 
   <section>
-    <h2>用 curl 测（最准）</h2>
+    <h2>Test with curl (most accurate)</h2>
     <table>
-      <tr><th>裸请求</th><td><code>curl -s https://你的域名/json</code></td></tr>
-      <tr><th>伪造 XFF</th><td><code>curl -s -H 'X-Forwarded-For: 9.9.9.9' https://你的域名/json</code></td></tr>
-      <tr><th>伪造 X-Real-IP</th><td><code>curl -s -H 'X-Real-IP: 8.8.8.8' https://你的域名/json</code></td></tr>
-      <tr><th>只看 IP 类头</th><td><code>curl -s https://你的域名/json | jq .ipLike</code></td></tr>
+      <tr><th>Bare</th><td><code>curl -s "https://YOUR-HOST/?json=1"</code></td></tr>
+      <tr><th>Fake XFF</th><td><code>curl -s -H 'X-Forwarded-For: 9.9.9.9' "https://YOUR-HOST/?json=1"</code></td></tr>
+      <tr><th>Fake X-Real-IP</th><td><code>curl -s -H 'X-Real-IP: 8.8.8.8' "https://YOUR-HOST/?json=1"</code></td></tr>
+      <tr><th>IP headers only</th><td><code>curl -s "https://YOUR-HOST/?json=1" | jq .ipLike</code></td></tr>
     </table>
+    <p class="note"><code>?json=1</code> works on any path, so it survives being mounted under a subdirectory.</p>
   </section>
 </div>
 
@@ -153,24 +195,45 @@ const PAGE = `<!doctype html>
 const IP_HINTS = ['eo-connecting-ip','cf-connecting-ip','true-client-ip','x-real-ip','x-forwarded-for',
   'x-client-ip','x-cluster-client-ip','x-original-forwarded-for','x-remote-ip','x-scf-client-ip','forwarded','via'];
 
+// Relative to the current document, so a subdirectory mount still works.
+const JSON_URL = '?json=1';
+
 function isIp(name){
   return IP_HINTS.includes(name) || /(^|-)(ip|ips|forwarded|real)$/.test(name) || /forwarded-for/.test(name);
 }
 
+function esc(v){
+  return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+}
+
 function rows(el, list){
-  if (!list.length){ el.innerHTML = '<tr><td class="empty">（没有匹配的头）</td></tr>'; return; }
-  el.innerHTML = list.map(([k,v]) =>
-    '<tr><th><code>'+k+'</code>'+(isIp(k)?'<span class="tag t-warn">IP 类</span>':'')+'</th><td><code>'+
-    String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code></td></tr>').join('');
+  if (!list.length){ el.innerHTML = '<tr><td class="empty">(no matching headers)</td></tr>'; return; }
+  el.innerHTML = list.map(function(pair){
+    var k = pair[0], v = pair[1];
+    return '<tr><th><code>' + k + '</code>' + (isIp(k) ? '<span class="tag t-warn">IP</span>' : '') +
+      '</th><td><code>' + esc(v) + '</code></td></tr>';
+  }).join('');
 }
 
 async function load(){
-  const r = await fetch('/json', { cache: 'no-store' });
+  const r = await fetch(JSON_URL, { cache: 'no-store' });
   const d = await r.json();
-  const all = Object.entries(d.headers).sort((a,b)=>a[0].localeCompare(b[0]));
-  const ip = all.filter(([k])=>isIp(k));
+
+  document.getElementById('route').innerHTML =
+    '<tr><th>rawUrl</th><td><code>' + esc(d.rawUrl) + '</code></td></tr>' +
+    '<tr><th>path</th><td><code>' + esc(d.path) + '</code></td></tr>' +
+    '<tr><th>query</th><td><code>' + esc(d.query || '(none)') + '</code></td></tr>' +
+    '<tr><th>runtime</th><td><code>' + esc(d.runtime) + '</code></td></tr>';
+
+  const all = Object.entries(d.headers).sort(function(a,b){ return a[0].localeCompare(b[0]); });
+  const ip = all.filter(function(p){ return isIp(p[0]); });
+  const rest = all.filter(function(p){ return !isIp(p[0]); });
   const el = document.getElementById('cur');
-  rows(el, ip.length ? ip.concat([['—— 其余头 ——','共 '+all.length+' 个']]).concat(all.filter(([k])=>!isIp(k))) : all);
+  if (ip.length) {
+    rows(el, ip.concat([['--- other headers ---', 'total ' + all.length]]).concat(rest));
+  } else {
+    rows(el, all);
+  }
 }
 load();
 
@@ -179,45 +242,50 @@ function verdict(){
   const el = document.getElementById('verdict');
   const base = state[''];
   if (!base) return;
-  const baseIp = base.ipLike;
   const lines = [];
-  for (const key of Object.keys(state)) {
-    if (key === '') continue;
+  Object.keys(state).forEach(function(key){
+    if (key === '') return;
     const cur = state[key];
-    const [hname] = key.split(':').map(s=>s.trim());
+    const hname = key.slice(0, key.indexOf(':')).trim();
     const lname = hname.toLowerCase();
     const got = cur.headers[lname];
     if (got === undefined){
-      lines.push('带 <code>'+hname+'</code> → 服务端<strong>完全没收到</strong>这个头（平台剥离了）。');
+      lines.push('Sent <code>' + hname + '</code> -&gt; <strong>never arrived</strong> (platform stripped it).');
     } else {
-      const sent = key.slice(key.indexOf(':')+1).trim();
-      if (got === sent) lines.push('带 <code>'+hname+'</code> → 原样透传 <code>'+got+'</code> <span class="tag t-bad">可伪造</span>');
-      else if (got.includes(sent)) lines.push('带 <code>'+hname+'</code> → 被<strong>追加</strong>为 <code>'+got+'</code> <span class="tag t-ok">取最后一跳可信</span>');
-      else lines.push('带 <code>'+hname+'</code> → 被<strong>覆盖</strong>为 <code>'+got+'</code> <span class="tag t-ok">平台接管</span>');
+      const sent = key.slice(key.indexOf(':') + 1).trim();
+      if (got === sent) lines.push('Sent <code>' + hname + '</code> -&gt; passed through as <code>' + esc(got) + '</code> <span class="tag t-bad">SPOOFABLE</span>');
+      else if (got.indexOf(sent) >= 0) lines.push('Sent <code>' + hname + '</code> -&gt; appended to <code>' + esc(got) + '</code> <span class="tag t-ok">TAKE LAST HOP</span>');
+      else lines.push('Sent <code>' + hname + '</code> -&gt; overwritten with <code>' + esc(got) + '</code> <span class="tag t-ok">PLATFORM OWNED</span>');
     }
-  }
-  if (!lines.length) { el.hidden = true; return; }
-  const baseIpHtml = Object.keys(baseIp).length
-    ? Object.entries(baseIp).map(([k,v])=>'<code>'+k+'</code>=<code>'+v+'</code>').join('、')
-    : '<em>裸请求里没有任何 IP 类头</em>';
-  el.innerHTML = '<b>裸请求里看到的 IP 类头：</b>' + baseIpHtml +
-    '<br><br><b>伪造测试结果：</b><br>' + lines.join('<br>');
+  });
+  if (!lines.length){ el.hidden = true; return; }
+  const baseKeys = Object.keys(base.ipLike);
+  const baseIpHtml = baseKeys.length
+    ? baseKeys.map(function(k){ return '<code>' + k + '</code>=<code>' + esc(base.ipLike[k]) + '</code>'; }).join(', ')
+    : '<em>no IP-shaped headers in the bare request</em>';
+  el.innerHTML = '<b>IP headers seen in the bare request:</b> ' + baseIpHtml +
+    '<br><br><b>Spoof test results:</b><br>' + lines.join('<br>');
   el.hidden = false;
 }
 
-document.querySelectorAll('button[data-h]').forEach(btn => {
-  btn.addEventListener('click', async () => {
+document.querySelectorAll('button[data-h]').forEach(function(btn){
+  btn.addEventListener('click', async function(){
     const spec = btn.dataset.h;
     const headers = {};
-    if (spec){ const i = spec.indexOf(':'); headers[spec.slice(0,i).trim()] = spec.slice(i+1).trim(); }
-    const r = await fetch('/json', { cache: 'no-store', headers });
+    if (spec){
+      const i = spec.indexOf(':');
+      headers[spec.slice(0, i).trim()] = spec.slice(i + 1).trim();
+    }
+    const r = await fetch(JSON_URL, { cache: 'no-store', headers: headers });
     const d = await r.json();
     state[spec] = d;
-    const all = Object.entries(d.headers).sort((a,b)=>a[0].localeCompare(b[0]));
-    const ip = all.filter(([k])=>isIp(k));
+    const all = Object.entries(d.headers).sort(function(a,b){ return a[0].localeCompare(b[0]); });
+    const ip = all.filter(function(p){ return isIp(p[0]); });
     const el = document.getElementById('cmp');
-    el.innerHTML = '<tr><th>'+(spec || '裸请求')+'</th><td>'+
-      (ip.length ? ip.map(([k,v])=>'<code>'+k+'</code> = <code>'+v+'</code>').join('<br>') : '<span class="empty">没有 IP 类头</span>')+
+    el.innerHTML = '<tr><th>' + esc(spec || 'bare request') + '</th><td>' +
+      (ip.length
+        ? ip.map(function(p){ return '<code>' + p[0] + '</code> = <code>' + esc(p[1]) + '</code>'; }).join('<br>')
+        : '<span class="empty">no IP-shaped headers</span>') +
       '</td></tr>';
     verdict();
   });
@@ -228,19 +296,16 @@ document.querySelectorAll('button[data-h]').forEach(btn => {
 
 function handler(context) {
   const request = context?.request ?? context;
-  const url = new URL(request.url);
-  const path = url.pathname.replace(/\/+$/, '') || '/';
+  const url = parseUrl(request);
 
-  if (path === '/json' || path === '/echo') {
+  if (wantsJson(request, url)) {
     return new Response(JSON.stringify(snapshot(request), null, 2), { status: 200, headers: JSON_HEADERS });
   }
-  if (path === '/' || path === '/index.html') {
-    return new Response(PAGE, { status: 200, headers: HTML_HEADERS });
-  }
-  return new Response(JSON.stringify({ error: 'not_found', path }), { status: 404, headers: JSON_HEADERS });
+  // Any other path serves the page: a probe answering 404 is never useful.
+  return new Response(PAGE, { status: 200, headers: HTML_HEADERS });
 }
 
-// 兼容 Makers 的几种调用约定
+// Tolerate the calling conventions Makers has used.
 handler.fetch = handler;
 handler.onRequest = handler;
 

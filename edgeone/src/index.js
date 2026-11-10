@@ -234,15 +234,31 @@ async function sweepRateKeys(store, now) {
     /* 清理失败不影响限流本身 */
   }
 }
+// 限流分桶：拿不到可信客户端 IP 时退到一个共享桶，但把上限放大。
+// 既不误伤正常流量（所有人共用一个严格阈值会互相踩），也不至于完全敞开
+// （高速暴力 / 枚举仍然会被挡住）。
+const SHARED_RATE_BUCKET = 'shared-untrusted-ip';
+const SHARED_RATE_FACTOR = 10;
+const SHARED_RATE_MIN = 120;
+
+function rateBucket(id, max) {
+  if (id != null && id !== '') return { id, max };
+  return {
+    id: SHARED_RATE_BUCKET,
+    max: Math.max(Number(max || 0) * SHARED_RATE_FACTOR, SHARED_RATE_MIN),
+  };
+}
+
 async function limit(c, kind, id, max, windowSec) {
+  const bucket = rateBucket(id, max);
   const store = getStore(c.env);
-  const digest = createHash('sha256').update(`${kind}:${id}`).digest('hex').slice(0, 32);
+  const digest = createHash('sha256').update(`${kind}:${bucket.id}`).digest('hex').slice(0, 32);
   const key = keys.rate(`${kind}/${digest}`);
   const now = Date.now();
   const cur = (await store.get(key))?.value;
   const sameWindow = cur && now - cur.start < windowSec * 1000;
   const count = sameWindow ? cur.count : 0;
-  if (count >= max) {
+  if (count >= bucket.max) {
     const retry = Math.max(1, Math.ceil((windowSec * 1000 - (now - cur.start)) / 1000));
     return c.json({ error: 'Too many requests. Please try again later.' }, 429, {
       'retry-after': String(retry),
@@ -260,9 +276,13 @@ async function limit(c, kind, id, max, windowSec) {
  * 合成一次只要 2 趟。
  */
 async function limits(c, specs) {
+  const usable = specs.map((s) => {
+    const b = rateBucket(s.id, s.max);
+    return { ...s, id: b.id, max: b.max };
+  });
   const store = getStore(c.env);
   const now = Date.now();
-  const entries = specs.map((s) => ({
+  const entries = usable.map((s) => ({
     spec: s,
     key: keys.rate(`${s.kind}/${createHash('sha256').update(`${s.kind}:${s.id}`).digest('hex').slice(0, 32)}`),
   }));
@@ -689,7 +709,7 @@ const authRequestId = String(p.authrequest ?? p.authRequest ?? '');
       if (
         !ar ||
         ar.approved !== 1 ||
-        ar.requestIp !== requestIp(c) ||
+        ipMismatch(ar.requestIp, requestIp(c)) ||
         Number(ar.deviceType) !== devType ||
         ar.requestDeviceIdentifier !== devId ||
         !safeEqual(ar.accessCode, mph)
@@ -2850,26 +2870,30 @@ async function importCiphers(c) {
 }
 
 // ---------------------------------------------------------------- auth requests (login with device)
-// 客户端 IP：只信平台/代理注入的头。
-// 注意 X-Forwarded-For 的**第一个**元素是客户端自己写的，早期版本直接取它，
-// 等于把按 IP 的限流和设备 IP 绑定全部作废（换一个头就是一票新配额）。
-// 这里的优先级：平台专有头 > x-real-ip > XFF 的**最后一跳**（最近代理追加的那一段）。
-// 部署后建议核对平台文档/日志，确认哪个头是真实的；若都不存在会退化成 'unknown'，
-// 那时所有请求共用同一个限流桶（宁可严一点，也不要可伪造）。
-const PLATFORM_IP_HEADERS = ['eo-connecting-ip', 'cf-connecting-ip', 'true-client-ip'];
+// 客户端 IP：只信平台注入的专有头。
+//
+// 实测（Makers 国内站，2026-11）：
+//   eo-connecting-ip : 123.12.70.167                                  <- 真实客户端
+//   x-real-ip        : 11.163.36.137                                  <- 边缘节点，不是客户端
+//   x-forwarded-for  : 123.6.40.114, 11.163.36.137, 10.132.167.133    <- 客户端, 边缘, SCF 内网
+//
+// 所以 x-real-ip 和 x-forwarded-for 都不能用来做客户端标识：
+// 前者是所有人共用的边缘节点地址（限流会误伤全部用户），
+// 后者含内网段，取第一段可被客户端伪造、取最后一段是 10.x。
+// 拿不到可信头时返回 null，由调用方跳过这一维度，而不是退化成一个共享值。
+const PLATFORM_IP_HEADERS = ['eo-connecting-ip', 'true-client-ip', 'cf-connecting-ip'];
 
 const requestIp = (c) => {
   for (const h of PLATFORM_IP_HEADERS) {
     const v = (c.req.header(h) || '').trim();
     if (v) return v;
   }
-  const real = (c.req.header('x-real-ip') || '').trim();
-  if (real) return real;
-  const xff = (c.req.header('x-forwarded-for') || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (xff.length) return xff[xff.length - 1];
-  return 'unknown';
+  return null;
 };
 
+// 请求 IP 与签发时记录的 IP 是否不一致。
+// 任何一方缺失（拿不到可信头）时不参与判断，避免把所有设备都判成不匹配。
+const ipMismatch = (recorded, current) => Boolean(recorded) && Boolean(current) && String(recorded) !== String(current);
 const requestDeviceType = (c) =>
   Number(c.req.header('device-type') ?? c.req.header('x-device-type') ?? 14) || 14;
 
@@ -3004,7 +3028,7 @@ app.get('/api/auth-requests/:id/response', async (c) => {
   const code = String(c.req.query('code') ?? '');
   if (
     Number(ar.deviceType) !== requestDeviceType(c) ||
-    ar.requestIp !== requestIp(c) ||
+    ipMismatch(ar.requestIp, requestIp(c)) ||
     !safeEqual(ar.accessCode, code)
   ) {
     return c.json({ error: "AuthRequest doesn't exist" }, 400);
